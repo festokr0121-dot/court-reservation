@@ -621,7 +621,7 @@ def cancel_time_window_and_continue():
         if not close_popup_with_esc(method=method):
             return False
         if wait_for_time_window_close(timeout=TIME_WINDOW_CLOSE_TIMEOUT_SEC):
-            print(f"[TIME-CANCEL] 시간창 닫힘 확인 attempt={attempt} → 다음 예약")
+            print(f"[TIME-CANCEL] 시간창 닫힘 확인 attempt={attempt} → 처음부터시작")
             return True
         print(
             f"[TIME-CANCEL] 시간창 닫힘 미확인 attempt={attempt} "
@@ -744,24 +744,39 @@ def color_match_area(
 
 def temporal_color_confirm(sample_count=2, required=1, interval=0.0, **match_kwargs):
     """연속 프레임 중 required회 이상 매칭되면 성공."""
+    matched, _, _, _ = temporal_color_confirm_details(
+        sample_count=sample_count,
+        required=required,
+        interval=interval,
+        **match_kwargs,
+    )
+    return matched
+
+
+def temporal_color_confirm_details(sample_count=2, required=1, interval=0.0, **match_kwargs):
+    """Return the match result and the sample that satisfied the color check."""
     success = 0
-    for _ in range(sample_count):
+    last_hits = 0
+    last_total = 0
+    for sample in range(1, sample_count + 1):
         if emergency_stop:
-            return False
-        matched, _, _ = color_match_area(**match_kwargs)
+            return False, last_hits, last_total, sample
+        matched, hits, total = color_match_area(**match_kwargs)
+        last_hits = hits
+        last_total = total
         if matched:
             success += 1
             if success >= required:
-                return True
+                return True, hits, total, sample
         if interval > 0:
             if not safe_sleep(interval):
-                return False
-    return False
+                return False, last_hits, last_total, sample
+    return False, last_hits, last_total, sample_count
 
 
 def detect_court_available(court_num):
     x, y = court_positions[court_num]
-    return temporal_color_confirm(
+    matched, hits, total, sample = temporal_color_confirm_details(
         sample_count=2,
         required=1,
         interval=0.0,
@@ -777,6 +792,16 @@ def detect_court_available(court_num):
         s_tol=0.35,
         v_tol=0.35,
     )
+    r, g, b = fast_pixel(x, y)
+    log_color_detection(
+        "court-available",
+        matched,
+        coords=(x, y),
+        rgb=(r, g, b),
+        target=TIME_AVAILABLE_COLORS,
+        detail=f"court={court_num} hits={hits}/{total} sample={sample}/2",
+    )
+    return matched
 
 def find_available_court(start_court):
     # 1) start_court 이후 먼저 검사
@@ -1246,6 +1271,20 @@ def get_people_marker_debug():
     return " | ".join(parts)
 
 
+def log_color_detection(stage, matched, coords=None, rgb=None, target=None, detail=""):
+    """Print one concise color-detection result with its sampled values."""
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    coord_text = f"coord={coords}" if coords is not None else ""
+    rgb_text = f"RGB={rgb}" if rgb is not None else ""
+    target_text = f"target={target}" if target is not None else ""
+    detail_text = f" {detail}" if detail else ""
+    fields = " ".join(value for value in (coord_text, rgb_text, target_text) if value)
+    print(
+        f"[COLOR] {timestamp} stage={stage} result={'PASS' if matched else 'FAIL'} "
+        f"{fields}{detail_text}"
+    )
+
+
 def wait_for_people_window_open(timeout=PEOPLE_WINDOW_OPEN_TIMEOUT_SEC):
     start = time.time()
     stable_hits = 0
@@ -1253,12 +1292,18 @@ def wait_for_people_window_open(timeout=PEOPLE_WINDOW_OPEN_TIMEOUT_SEC):
         if detect_people_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_OPEN_STABLE_HITS:
+                log_color_detection(
+                    "people-window", True, detail=f"markers=[{get_people_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "people-window", False, detail=f"markers=[{get_people_marker_debug()}]"
+    )
     return False
 
 
@@ -1288,10 +1333,21 @@ def wait_for_time_window_ready(max_attempts=TIME_WINDOW_OPEN_MAX_RETRIES):
         else:
             attempt_timeout = TIME_WINDOW_OPEN_TIMEOUT_SEC
 
+        attempt_started = time.monotonic()
         marker_open = wait_for_time_window_open(timeout=attempt_timeout)
         if emergency_stop:
             return False
         bright_open = is_time_window_open() if TIME_WINDOW_USE_BRIGHTNESS_FALLBACK else False
+        elapsed = time.monotonic() - attempt_started
+        log_color_detection(
+            "time-window",
+            marker_open or bright_open,
+            detail=(
+                f"attempt={attempt + 1}/{max_attempts} elapsed={elapsed:.3f}s "
+                f"marker_open={marker_open} brightness_open={bright_open} "
+                f"markers=[{get_time_marker_debug()}]"
+            ),
+        )
         if marker_open or bright_open:
             return True
         if not safe_sleep(TIME_WINDOW_OPEN_RETRY_GAP_SEC):
@@ -1306,12 +1362,18 @@ def wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC):
         if detect_court_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_OPEN_STABLE_HITS:
+                log_color_detection(
+                    "court-window", True, detail=f"markers=[{get_court_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "court-window", False, detail=f"markers=[{get_court_marker_debug()}]"
+    )
     return False
 
 
@@ -1322,12 +1384,18 @@ def wait_for_usage_window_open(timeout=USAGE_WINDOW_OPEN_TIMEOUT_SEC):
         if detect_usage_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_OPEN_STABLE_HITS:
+                log_color_detection(
+                    "usage-window", True, detail=f"markers=[{get_usage_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "usage-window", False, detail=f"markers=[{get_usage_marker_debug()}]"
+    )
     return False
 
 
@@ -1338,12 +1406,18 @@ def wait_for_time_window_close(timeout=TIME_WINDOW_CLOSE_TIMEOUT_SEC):
         if not detect_time_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                log_color_detection(
+                    "time-window-close", True, detail=f"markers=[{get_time_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "time-window-close", False, detail=f"markers=[{get_time_marker_debug()}]"
+    )
     return False
 
 
@@ -1354,12 +1428,18 @@ def wait_for_court_window_close(timeout=COURT_WINDOW_CLOSE_TIMEOUT_SEC):
         if not detect_court_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                log_color_detection(
+                    "court-window-close", True, detail=f"markers=[{get_court_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "court-window-close", False, detail=f"markers=[{get_court_marker_debug()}]"
+    )
     return False
 
 
@@ -1370,12 +1450,18 @@ def wait_for_usage_window_close(timeout=USAGE_WINDOW_CLOSE_TIMEOUT_SEC):
         if not detect_usage_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                log_color_detection(
+                    "usage-window-close", True, detail=f"markers=[{get_usage_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "usage-window-close", False, detail=f"markers=[{get_usage_marker_debug()}]"
+    )
     return False
 
 
@@ -1386,51 +1472,102 @@ def wait_for_people_window_close(timeout=PEOPLE_NEXT_STEP_MARKER_TIMEOUT_SEC):
         if not detect_people_window_open():
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                log_color_detection(
+                    "people-window-close", True, detail=f"markers=[{get_people_marker_debug()}]"
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    log_color_detection(
+        "people-window-close", False, detail=f"markers=[{get_people_marker_debug()}]"
+    )
     return False
 
 
 def wait_for_payment_window(timeout=PAYMENT_WINDOW_OPEN_TIMEOUT_SEC):
     """결제창 전용 판정: 결제창 마커는 열리고, 인원창 마커는 닫혀야 한다."""
-    start = time.time()
+    start = time.monotonic()
     stable_hits = 0
-    while time.time() - start < timeout:
+    while time.monotonic() - start < timeout:
         payment_open = detect_payment_window_open()
         people_open = detect_people_window_open()
 
         if payment_open and (not people_open):
             stable_hits += 1
             if stable_hits >= 2:
+                log_color_detection(
+                    "payment-window",
+                    True,
+                    detail=(
+                        f"payment_markers=[{get_payment_marker_debug()}] "
+                        f"people_markers=[{get_people_marker_debug()}]"
+                    ),
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
+            log_color_detection(
+                "payment-window",
+                False,
+                detail=(
+                    f"reason=interrupted elapsed={time.monotonic() - start:.3f}s "
+                    f"payment_markers=[{get_payment_marker_debug()}] "
+                    f"people_markers=[{get_people_marker_debug()}]"
+                ),
+            )
             return False
 
+    log_color_detection(
+        "payment-window",
+        False,
+        detail=(
+            f"reason=timeout elapsed={time.monotonic() - start:.3f}s "
+            f"payment_markers=[{get_payment_marker_debug()}] "
+            f"people_markers=[{get_people_marker_debug()}]"
+        ),
+    )
     return False
 
 
 def wait_for_payment_window_close(timeout=PAYMENT_WINDOW_CLOSE_TIMEOUT_SEC):
-    start = time.time()
+    start = time.monotonic()
     stable_hits = 0
-    while time.time() - start < timeout:
+    while time.monotonic() - start < timeout:
         payment_open = detect_payment_window_open()
         if not payment_open:
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                log_color_detection(
+                    "payment-window-close", True,
+                    detail=f"markers=[{get_payment_marker_debug()}]",
+                )
                 return True
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
+            log_color_detection(
+                "payment-window-close", False,
+                detail=(
+                    f"reason=interrupted elapsed={time.monotonic() - start:.3f}s "
+                    f"markers=[{get_payment_marker_debug()}]"
+                ),
+            )
             return False
 
+    log_color_detection(
+        "payment-window-close",
+        False,
+        detail=(
+            f"reason=timeout elapsed={time.monotonic() - start:.3f}s "
+            f"markers=[{get_payment_marker_debug()}]"
+        ),
+    )
     return False
 
 
@@ -1477,11 +1614,26 @@ def wait_for_usage_type_selected(timeout=1.2):
     start = time.time()
     while time.time() - start < timeout:
         if detect_usage_type_selected():
+            markers = " | ".join(
+                f"({mx},{my}):RGB={fast_pixel(mx, my)}"
+                for mx, my in USAGE_TYPE_SELECTED_MARKERS
+            )
+            log_color_detection(
+                "usage-type-selected", True, target=(255, 0, 0),
+                detail=f"markers=[{markers}]",
+            )
             return True
         if emergency_stop:
             return False
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
             return False
+    markers = " | ".join(
+        f"({mx},{my}):RGB={fast_pixel(mx, my)}"
+        for mx, my in USAGE_TYPE_SELECTED_MARKERS
+    )
+    log_color_detection(
+        "usage-type-selected", False, target=(255, 0, 0), detail=f"markers=[{markers}]"
+    )
     return False
 
 
@@ -1590,12 +1742,13 @@ def log_time_detection_debug(target_time):
         print(f"[TIME-DEBUG] 백업표 {target_time} 좌표 없음")
 
 def click_and_confirm_selection(x, y, timeout=0.5, selected_color=SELECTED_COLOR,
-                                skip_if_selected=False, before_click=None):
-    for _ in range(3):
+                                skip_if_selected=False, before_click=None, label="selection"):
+    selected_hsv = rgb_to_hsv_deg(*selected_color)
+    for attempt in range(1, 4):
         if emergency_stop:
             return False
         if skip_if_selected:
-            selected = temporal_color_confirm(
+            selected, hits, total, sample = temporal_color_confirm_details(
                 sample_count=2,
                 required=1,
                 interval=0.0,
@@ -1606,12 +1759,17 @@ def click_and_confirm_selection(x, y, timeout=0.5, selected_color=SELECTED_COLOR
                 radius=0,
                 min_hits=1,
                 use_strong=False,
-                hsv_targets=[SELECTED_HSV],
+                hsv_targets=[selected_hsv],
                 h_tol=18.0,
                 s_tol=0.30,
                 v_tol=0.30,
             )
             if selected:
+                r, g, b = fast_pixel(x, y)
+                log_color_detection(
+                    label, True, coords=(x, y), rgb=(r, g, b), target=selected_color,
+                    detail=f"already_selected=True hits={hits}/{total} sample={sample}/2",
+                )
                 return True
         if not safe_click(x, y, before_click=before_click):
             return False
@@ -1619,7 +1777,7 @@ def click_and_confirm_selection(x, y, timeout=0.5, selected_color=SELECTED_COLOR
         while time.monotonic() < deadline:
             if emergency_stop:
                 return False
-            selected = temporal_color_confirm(
+            selected, hits, total, sample = temporal_color_confirm_details(
                 sample_count=2,
                 required=1,
                 interval=0.0,
@@ -1630,22 +1788,32 @@ def click_and_confirm_selection(x, y, timeout=0.5, selected_color=SELECTED_COLOR
                 radius=0,
                 min_hits=1,
                 use_strong=False,
-                hsv_targets=[SELECTED_HSV],
+                hsv_targets=[selected_hsv],
                 h_tol=18.0,
                 s_tol=0.30,
                 v_tol=0.30,
             )
             if selected:
+                r, g, b = fast_pixel(x, y)
+                log_color_detection(
+                    label, True, coords=(x, y), rgb=(r, g, b), target=selected_color,
+                    detail=f"attempt={attempt} hits={hits}/{total} sample={sample}/2",
+                )
                 return True
             if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
                 return False
+    r, g, b = fast_pixel(x, y)
+    log_color_detection(
+        label, False, coords=(x, y), rgb=(r, g, b), target=selected_color,
+        detail=f"attempts=3 hits={hits}/{total} sample={sample}/2",
+    )
     return False
 
 def select_payment_options():
     for label, x, y in (("약관 동의", 263, 567), ("신용카드", 311, 745)):
         # 결제 옵션 선택 확인색: 파란색 (#005CC8)
         if not click_and_confirm_selection(x, y, selected_color=(0, 92, 200),
-                                           skip_if_selected=True):
+                                           skip_if_selected=True, label=f"payment-{label}"):
             if not emergency_stop:
                 print(f"[FAIL] {label} 색상 2회 클릭 후 미감지 - 다음 예약")
             return False
@@ -1707,7 +1875,7 @@ def detect_time_slot_position(target_time):
     default_pos = time_positions.get(target_time)
     if default_pos:
         tx, ty = default_pos
-        matched = temporal_color_confirm(
+        matched, hits, total, sample = temporal_color_confirm_details(
             sample_count=2,
             required=1,
             interval=0.0,
@@ -1723,15 +1891,26 @@ def detect_time_slot_position(target_time):
             s_tol=0.35,
             v_tol=0.35,
         )
+        dr, dg, db = fast_pixel_strong(tx, ty)
+        log_color_detection(
+            "time-slot-default", matched, coords=(tx, ty), rgb=(dr, dg, db),
+            target=TIME_AVAILABLE_COLORS,
+            detail=f"time={target_time} hits={hits}/{total} sample={sample}/2",
+        )
         if matched:
             selected_pos = (tx, ty)
             selected_source = "default"
+    else:
+        log_color_detection(
+            "time-slot-default", False, target=TIME_AVAILABLE_COLORS,
+            detail=f"time={target_time} coord=missing",
+        )
 
     if selected_pos is None:
         backup_pos = short_time_positions.get(target_time)
         if backup_pos:
             tx, ty = backup_pos
-            matched = temporal_color_confirm(
+            matched, hits, total, sample = temporal_color_confirm_details(
                 sample_count=2,
                 required=1,
                 interval=0.0,
@@ -1747,15 +1926,26 @@ def detect_time_slot_position(target_time):
                 s_tol=0.40,
                 v_tol=0.40,
             )
+            br, bg, bb = fast_pixel(tx, ty)
+            log_color_detection(
+                "time-slot-backup", matched, coords=(tx, ty), rgb=(br, bg, bb),
+                target=TIME_AVAILABLE_COLORS,
+                detail=f"time={target_time} hits={hits}/{total} sample={sample}/2",
+            )
             if matched:
                 selected_pos = (tx, ty)
                 selected_source = "backup"
+        else:
+            log_color_detection(
+                "time-slot-backup", False, target=TIME_AVAILABLE_COLORS,
+                detail=f"time={target_time} coord=missing",
+            )
 
     return selected_pos, selected_source
 
 def confirm_time_slot_before_click(x, y):
     """Require the actual click point to match an available color in both samples."""
-    return temporal_color_confirm(
+    matched, hits, total, sample = temporal_color_confirm_details(
         sample_count=2,
         required=2,
         interval=0.0,
@@ -1767,6 +1957,13 @@ def confirm_time_slot_before_click(x, y):
         min_hits=1,
         use_strong=False,
     )
+    r, g, b = fast_pixel(x, y)
+    log_color_detection(
+        "time-slot-before-click", matched, coords=(x, y), rgb=(r, g, b),
+        target=TIME_AVAILABLE_COLORS,
+        detail=f"hits={hits}/{total} sample={sample}/2",
+    )
+    return matched
 
 # ============================
 # 예약 실행
@@ -1782,6 +1979,11 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
             return
         record_stage_outcome(stage_name, ok)
         stage_recorded.add(stage_name)
+
+    def stop_on_court_window_missing():
+        print("❌ 코트창 열림 미확인 - 코트 검색/클릭 없이 자동 실행 중단")
+        status.set("❌ 코트창 감지 실패 - 안전을 위해 자동 실행 중단")
+        mark_stage("court", False)
 
     if not run_reservation_light_check():
         print("❌ 예약 시작 전 환경 점검/보정 실패 → 다음 예약")
@@ -1849,6 +2051,7 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
             if not click_and_confirm_selection(
                 tx, ty, timeout=1.2,
                 before_click=lambda: confirm_time_slot_before_click(tx, ty),
+                label=f"time-slot-{res['time']}",
             ):
                 if emergency_stop:
                     return "STOP"
@@ -1869,7 +2072,9 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
                 if not cancel_time_window_and_continue():
                     return "STOP"
                 return NEXT_RESERVATION_AFTER_ESC
-            wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC)
+            if not wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC):
+                stop_on_court_window_missing()
+                return "STOP"
 
             mark_stage("time", True)
 
@@ -1880,7 +2085,9 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
         # ============================
         elif state == STATE_COURT:
 
-            wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC)
+            if not wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC):
+                stop_on_court_window_missing()
+                return "STOP"
 
             # 완전 오름차순 순환 검색
             target_court = find_available_court(res["court"])
@@ -1892,7 +2099,9 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
                 return "NEXT_RESERVATION"
 
             cx, cy = court_positions[target_court]
-            if not click_and_confirm_selection(cx, cy, timeout=1.2):
+            if not click_and_confirm_selection(
+                cx, cy, timeout=1.2, label=f"court-{target_court}-selected"
+            ):
                 if emergency_stop:
                     return "STOP"
                 cr, cg, cb = fast_pixel_strong(cx, cy)
@@ -2455,6 +2664,9 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
                 dy,
                 first_values[0],
             )
+            if not safe_sleep(0.1):
+                status.set("⚠ ESC로 취소됨")
+                return
             if wait_for_time_window_ready(max_attempts=1):
                 print("[AUTO-START] 첫 시간창 열림 확인 완료 → 시간 선택 진행")
                 auto_start_date_clicked = True
