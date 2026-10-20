@@ -34,6 +34,14 @@ AUTO_START_NEXT_MONTH_CLICK_Y = 675
 AUTO_START_AFTER_NEXT_CLICK_DELAY_SEC = 0.1
 AUTO_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.3
 MANUAL_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.3
+MANUAL_START_POPUP_CLOSE_TIMEOUT_SEC = 1.0
+MANUAL_POPUP_RECLICK_DELAY_SEC = 0.1
+MANUAL_ERROR_POPUP_POSITION = (665, 207)
+MANUAL_ERROR_POPUP_COLOR = (39, 35, 32)
+MANUAL_ERROR_POPUP_HOVER_COLOR = (0, 0, 0)
+MANUAL_DEV_POPUP_POSITION = (579, 705)
+MANUAL_DEV_POPUP_COLOR = (240, 248, 255)
+MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC = 0.3
 AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC = 0.3
 AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC = 0.3
 AUTO_START_PAGE_UP_RETRY_DELAY_SEC = 0.3
@@ -1181,14 +1189,39 @@ def detect_payment_window_open(required_hits=PAYMENT_WINDOW_MARKER_REQUIRED_HITS
     return False
 
 
-def detect_time_window_open(required_hits=TIME_WINDOW_MARKER_REQUIRED_HITS):
+def sample_time_window_markers(required_hits=TIME_WINDOW_MARKER_REQUIRED_HITS):
+    """Return the open decision and the exact RGB samples used to make it."""
     hits = 0
+    samples = []
     for mx, my in TIME_WINDOW_MARKERS:
-        if is_window_marker_open(mx, my, TIME_WINDOW_OPEN_COLOR):
+        r, g, b = fast_pixel(mx, my)
+        matched = color_close(r, g, b, TIME_WINDOW_OPEN_COLOR, tol=18)
+        if not matched:
+            matched = hsv_close(
+                rgb_to_hsv_deg(r, g, b),
+                rgb_to_hsv_deg(*TIME_WINDOW_OPEN_COLOR),
+                h_tol=20.0,
+                s_tol=0.35,
+                v_tol=0.35,
+            )
+        samples.append((mx, my, (r, g, b), matched))
+        if matched:
             hits += 1
             if hits >= required_hits:
-                return True
-    return False
+                break
+    return hits >= required_hits, samples
+
+
+def format_time_window_samples(samples):
+    return " | ".join(
+        f"({mx},{my}):RGB={rgb} matched={matched}"
+        for mx, my, rgb, matched in samples
+    )
+
+
+def detect_time_window_open(required_hits=TIME_WINDOW_MARKER_REQUIRED_HITS):
+    matched, _ = sample_time_window_markers(required_hits)
+    return matched
 
 
 def detect_court_window_open(required_hits=COURT_WINDOW_MARKER_REQUIRED_HITS):
@@ -1310,17 +1343,19 @@ def wait_for_people_window_open(timeout=PEOPLE_WINDOW_OPEN_TIMEOUT_SEC):
 def wait_for_time_window_open(timeout=TIME_WINDOW_OPEN_TIMEOUT_SEC):
     start = time.time()
     stable_hits = 0
+    last_samples = []
     while time.time() - start < timeout:
-        if detect_time_window_open():
+        matched, last_samples = sample_time_window_markers()
+        if matched:
             stable_hits += 1
             if stable_hits >= WINDOW_OPEN_STABLE_HITS:
-                return True
+                return True, last_samples
         else:
             stable_hits = 0
 
         if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
-            return False
-    return False
+            return False, last_samples
+    return False, last_samples
 
 
 def wait_for_time_window_ready(max_attempts=TIME_WINDOW_OPEN_MAX_RETRIES):
@@ -1334,18 +1369,20 @@ def wait_for_time_window_ready(max_attempts=TIME_WINDOW_OPEN_MAX_RETRIES):
             attempt_timeout = TIME_WINDOW_OPEN_TIMEOUT_SEC
 
         attempt_started = time.monotonic()
-        marker_open = wait_for_time_window_open(timeout=attempt_timeout)
+        marker_open, decision_samples = wait_for_time_window_open(timeout=attempt_timeout)
         if emergency_stop:
             return False
         bright_open = is_time_window_open() if TIME_WINDOW_USE_BRIGHTNESS_FALLBACK else False
         elapsed = time.monotonic() - attempt_started
+        post_check_markers = get_time_marker_debug()
         log_color_detection(
             "time-window",
             marker_open or bright_open,
             detail=(
                 f"attempt={attempt + 1}/{max_attempts} elapsed={elapsed:.3f}s "
                 f"marker_open={marker_open} brightness_open={bright_open} "
-                f"markers=[{get_time_marker_debug()}]"
+                f"decision_markers=[{format_time_window_samples(decision_samples)}] "
+                f"post_check_markers=[{post_check_markers}]"
             ),
         )
         if marker_open or bright_open:
@@ -1845,7 +1882,7 @@ def detect_already_reserved_strong():
 def detect_already_reserved():
     x, y = 665, 207
     r, g, b = fast_pixel_strong(x, y)
-    return r == 0 and g == 0 and b == 0
+    return (r, g, b) == (39, 35, 32)
 
 def detect_full_agree_popup():
     # 전체동의 팝업 기준색: 주황색 (#F85E13)
@@ -2030,7 +2067,7 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
                     "❌ 시간창 미오픈(예약불가 날짜 가능성) → 다음 예약으로 이동 "
                     f"markerCoord=(478,812) markerRGB=({mr},{mg},{mb}) "
                     f"brightnessCoord=(610,262) rgb=({bright_r},{bright_g},{bright_b}) "
-                    f"markers=[{get_time_marker_debug()}]"
+                    f"post_failure_diagnostic_markers=[{get_time_marker_debug()}]"
                 )
                 mark_stage("time", False)
                 if not cancel_time_window_and_continue():
@@ -2084,11 +2121,6 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
         # 2) 코트 선택 단계
         # ============================
         elif state == STATE_COURT:
-
-            if not wait_for_court_window_open(timeout=COURT_WINDOW_OPEN_TIMEOUT_SEC):
-                stop_on_court_window_missing()
-                return "STOP"
-
             # 완전 오름차순 순환 검색
             target_court = find_available_court(res["court"])
 
@@ -2121,7 +2153,6 @@ def run_reservation(res, time_window_confirmed=False, finish_on_time_window_miss
                 print(f"[COURT-DEBUG] markers=[{get_court_marker_debug()}]")
                 mark_stage("court", False)
                 return "NEXT_RESERVATION"
-            wait_for_usage_window_open(timeout=USAGE_WINDOW_OPEN_TIMEOUT_SEC)
 
             mark_stage("court", True)
 
@@ -2468,6 +2499,77 @@ def get_first_reservation_date_position():
     return get_date_position(y, m, d)
 
 
+def clear_manual_start_popup():
+    """수동 시작 팝업 처리 결과를 READY/CLEARED/STOP으로 반환한다."""
+    if not safe_sleep(0):
+        return "STOP"
+    popup = None
+    for name, position, color in (
+        ("error", MANUAL_ERROR_POPUP_POSITION, MANUAL_ERROR_POPUP_COLOR),
+        ("devtools", MANUAL_DEV_POPUP_POSITION, MANUAL_DEV_POPUP_COLOR),
+    ):
+        if name != "error":
+            pyautogui.moveTo(*position)
+        rgb = fast_pixel(*position)
+        active_colors = (
+            (color, MANUAL_ERROR_POPUP_HOVER_COLOR) if name == "error" else (color,)
+        )
+        matched = rgb in active_colors
+        timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+        print(
+            f"[MANUAL-POPUP-CHECK] {timestamp} type={name} "
+            f"coord=({position[0]},{position[1]}) RGB={rgb} "
+            f"target={color} active_colors={active_colors} matched={matched}"
+        )
+        if matched:
+            popup = (name, position, color, active_colors)
+            break
+    if popup is None:
+        return "READY"
+
+    name, position, color, active_colors = popup
+    status.set(f"수동 시작 팝업 감지 ({name}) → 0.1초 간격 2회 클릭")
+    print(f"[MANUAL-POPUP] 감지 type={name} coord={position} RGB={color}")
+    if name == "error":
+        print("[MANUAL-POPUP] 오류창 감지 후 0.1초 대기 → 첫 클릭")
+        if not safe_sleep(MANUAL_POPUP_RECLICK_DELAY_SEC):
+            return "STOP"
+    if not safe_sleep(0):
+        return "STOP"
+    logged_click(*position)
+    if not safe_sleep(MANUAL_POPUP_RECLICK_DELAY_SEC):
+        return "STOP"
+    logged_click(*position)
+    if not safe_sleep(MANUAL_POPUP_RECLICK_DELAY_SEC):
+        return "STOP"
+
+    deadline = time.monotonic() + MANUAL_START_POPUP_CLOSE_TIMEOUT_SEC
+    stable_hits = 0
+    while time.monotonic() < deadline:
+        if not safe_sleep(0):
+            return "STOP"
+        if fast_pixel(*position) in active_colors:
+            stable_hits = 0
+        else:
+            stable_hits += 1
+            if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
+                if name == "devtools":
+                    pyautogui.press("pageup")
+                    if not safe_sleep(MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC):
+                        return "STOP"
+                print(f"[MANUAL-POPUP] 닫힘 확인 type={name} → 시작 전 검사부터 재시작")
+                return "CLEARED"
+        if not safe_sleep(WINDOW_DETECT_POLL_INTERVAL_SEC):
+            return "STOP"
+
+    status.set(f"❌ 팝업 닫힘 미확인 ({name}) - 수동 시작 중단")
+    print(
+        f"[MANUAL-POPUP] 닫힘 확인 실패 type={name} "
+        "- 다음 클릭/PageUp 없이 수동 시작 중단"
+    )
+    return "STOP"
+
+
 def run_manual_start_flow(items=None):
     """수동 시작 시 예약 화면에 진입하고 예약리스트 첫 날짜를 선택한다."""
     if items is None:
@@ -2495,25 +2597,27 @@ def run_manual_start_flow(items=None):
             status.set("⚠ ESC로 취소됨")
             return False
 
+        popup_result = clear_manual_start_popup()
+        if popup_result == "STOP":
+            if emergency_stop:
+                status.set("⚠ ESC로 취소됨")
+            return False
+        if popup_result == "CLEARED":
+            continue
+
+        print("[MANUAL-START] 시작 전 팝업 미감지 → (235,330) 클릭 후 정상 진행")
         status.set("수동 시작흐름 실행 중...")
         logged_click(AUTO_START_FIRST_CLICK_X, AUTO_START_FIRST_CLICK_Y)
         if not safe_sleep(AUTO_START_AFTER_FIRST_CLICK_DELAY_SEC):
             status.set("⚠ ESC로 취소됨")
             return False
 
-        pyautogui.moveTo(
-            AUTO_START_NOT_PERIOD_CHECK_X,
-            AUTO_START_NOT_PERIOD_CHECK_Y,
-        )
-        if detect_auto_start_not_period_color():
-            status.set("예약 기간 아님 감지 → (665, 207) 클릭 후 1번부터 재시작")
-            logged_click(
-                AUTO_START_NOT_PERIOD_CHECK_X,
-                AUTO_START_NOT_PERIOD_CHECK_Y,
-            )
-            if not safe_sleep(AUTO_START_RETRY_CLICK_DELAY_SEC):
+        popup_result = clear_manual_start_popup()
+        if popup_result == "STOP":
+            if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
-                return False
+            return False
+        if popup_result == "CLEARED":
             continue
 
         while fast_pixel(
@@ -2677,7 +2781,10 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
                 return
 
             status.set("시간창 열림 미감지 → 팝업 정리 후 자동 시작 재시도")
-            print(f"[AUTO-START] 시간창 미오픈 markers=[{get_time_marker_debug()}]")
+            print(
+                "[AUTO-START] 시간창 미오픈 "
+                f"post_failure_diagnostic_markers=[{get_time_marker_debug()}]"
+            )
             if not cancel_time_window_and_continue():
                 stop_all_automation("❌ 시간창 정리/닫힘 확인 실패 - 자동 시작 중단")
                 return
@@ -3202,11 +3309,16 @@ def build_process_coordinate_summary_text():
     lines.append("- 결제 버튼: (530,901)")
     lines.append("- 대기 모드 닫기(X): (682,125)")
     lines.append("- 완료 후 포커스 복귀: (807,247)")
-    lines.append("- 이미예약 팝업 확인 버튼: (665,207), 검정색(RGB=0,0,0) 감지")
+    lines.append("- 이미예약 팝업 확인 버튼(수동/자동 공통): (665,207), RGB=(39,35,32) 감지")
     lines.append("")
     lines.append("ESC: 짧게 전체 일시정지/재개, 0.5초 이상 전체 취소")
     lines.append("")
     lines.append("8) 자동(F2) 보조 좌표")
+    lines.append(f"- 수동 시작/반복: 첫 클릭 전후 {MANUAL_ERROR_POPUP_POSITION}의 RGB={MANUAL_ERROR_POPUP_COLOR} 감지 → 0.1초 대기 → 같은 좌표 클릭 → 0.1초 → 재클릭 → 0.1초")
+    lines.append(f"- 수동 오류창 검사는 마우스 이동 없이 수행, 마우스 오버 색상 {MANUAL_ERROR_POPUP_HOVER_COLOR}도 감지/닫힘 확인에 포함")
+    lines.append("- 수동 팝업 검사 로그: MANUAL-POPUP-CHECK에 좌표/실제 RGB/기준색/matched 기록, 미감지 시 MANUAL-START 후 첫 클릭 진행")
+    lines.append("- 수동 개발도구 팝업: (579,705), RGB=(240,248,255) 감지 시 클릭 → 0.1초 → 재클릭 → 0.1초 → 닫힘 확인 → PageUp → 0.3초 → 시작 전 검사부터 재시작")
+    lines.append(f"- 수동 시작 전 팝업: 닫힘을 최대 {MANUAL_START_POPUP_CLOSE_TIMEOUT_SEC:.1f}초 확인, 미확인 시 첫 클릭 없이 해당 실행 중단")
     lines.append("- 자동 실행 준비 클릭: (235,330)")
     lines.append("- 자동 실행 다음달 클릭: (682,675)")
     lines.append("- 준비 색상 검사 좌표: (427,739)")
