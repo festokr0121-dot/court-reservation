@@ -1378,6 +1378,7 @@ def wait_for_time_window_ready(max_attempts=TIME_WINDOW_OPEN_MAX_RETRIES):
         log_color_detection(
             "time-window",
             marker_open or bright_open,
+            target=TIME_WINDOW_OPEN_COLOR,
             detail=(
                 f"attempt={attempt + 1}/{max_attempts} elapsed={elapsed:.3f}s "
                 f"marker_open={marker_open} brightness_open={bright_open} "
