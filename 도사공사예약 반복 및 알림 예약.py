@@ -5,6 +5,7 @@ import os
 import json
 import threading
 import colorsys
+import math
 import tkinter as tk
 from tkinter import ttk
 import pyautogui
@@ -3771,7 +3772,7 @@ pay_check = ttk.Radiobutton(root, text="결제", variable=mode_var, value="pay")
 wait_check.grid(row=17, column=0)
 pay_check.grid(row=17, column=1)
 
-# 최초 실행부터 빠름 프로필을 사용한다.
+# 기본값은 빠름 프로필이며, 정상 종료 시 저장한 개별 값은 load_ui_state에서 복원한다.
 click_delay_var = tk.DoubleVar(value=0.01)
 press_delay_var = tk.DoubleVar(value=0.01)
 page_delay_var = tk.DoubleVar(value=0.05)
@@ -3797,40 +3798,56 @@ ttk.Entry(root, textvariable=calendar_delay_var, width=5).grid(row=22, column=1)
 ttk.Label(root, text="코트 선택 딜레이").grid(row=23, column=0)
 ttk.Entry(root, textvariable=court_delay_var, width=5).grid(row=23, column=1)
 
-# 프로필 저장
-def set_profile_fast():
-    click_delay_var.set(0.01)
-    press_delay_var.set(0.01)
-    page_delay_var.set(0.05)
-    pay_delay_var.set(0.05)
-    calendar_delay_var.set(0.05)
-    court_delay_var.set(0.05)
+# 프로필 전환 시 현재 입력값을 저장하고 선택한 프로필의 사용자 값을 복원한다.
+delay_profile_values = {
+    "FAST": dict(zip(("click", "press", "page", "payment", "calendar", "court"),
+                     (0.01, 0.01, 0.05, 0.05, 0.05, 0.05))),
+    "NORMAL": dict(zip(("click", "press", "page", "payment", "calendar", "court"),
+                       (0.08, 0.06, 0.25, 0.18, 0.15, 0.15))),
+    "SAFE": dict(zip(("click", "press", "page", "payment", "calendar", "court"),
+                     (0.15, 0.10, 0.50, 0.30, 0.20, 0.20))),
+}
+active_delay_profile = "FAST"
 
-    status.set("빠름 모드 적용됨")
-    with open(settings_path("profile_settings.txt"), "w") as f:
-        f.write("FAST")
+
+def select_delay_profile(mode):
+    global active_delay_profile
+    current = {}
+    for name, variable in get_delay_variables().items():
+        try:
+            value = variable.get()
+        except (tk.TclError, ValueError) as error:
+            status.set("딜레이 입력 오류 - 숫자 입력 후 프로필을 변경하세요")
+            print(f"[PROFILE-SWITCH-FAIL] {name}: {error}")
+            return
+        if not math.isfinite(value) or value < 0:
+            status.set("딜레이는 0 이상의 유한한 숫자로 입력하세요")
+            print(f"[PROFILE-SWITCH-FAIL] {name}: {value}")
+            return
+        current[name] = value
+    delay_profile_values[active_delay_profile] = current
+    active_delay_profile = mode
+    for name, variable in get_delay_variables().items():
+        variable.set(delay_profile_values[mode][name])
+    try:
+        save_ui_state()
+        with open(settings_path("profile_settings.txt"), "w") as f:
+            f.write(mode)
+    except OSError as error:
+        status.set("프로필 적용됨 - 저장 실패, 로그를 확인하세요")
+        print(f"[PROFILE-SAVE-FAIL] {error}")
+        return
+    status.set(f"{ {'FAST': '빠름', 'NORMAL': '보통', 'SAFE': '안정'}[mode]} 사용자 설정 적용/저장됨")
+
+
+def set_profile_fast():
+    select_delay_profile("FAST")
 
 def set_profile_normal():
-    click_delay_var.set(0.08)
-    press_delay_var.set(0.06)
-    page_delay_var.set(0.25)
-    pay_delay_var.set(0.18)
-    calendar_delay_var.set(0.15)
-    court_delay_var.set(0.15)
-    status.set("보통 모드 적용됨")
-    with open(settings_path("profile_settings.txt"), "w") as f:
-        f.write("NORMAL")
+    select_delay_profile("NORMAL")
 
 def set_profile_safe():
-    click_delay_var.set(0.15)
-    press_delay_var.set(0.10)
-    page_delay_var.set(0.50)
-    pay_delay_var.set(0.30)
-    calendar_delay_var.set(0.20)
-    court_delay_var.set(0.20)
-    status.set("안정 모드 적용됨")
-    with open(settings_path("profile_settings.txt"), "w") as f:
-        f.write("SAFE")
+    select_delay_profile("SAFE")
 
 tk.Button(root, text="빠름", command=set_profile_fast, bg="#E57373", activebackground="#EF5350", fg="white", font=("맑은 고딕", 9)).grid(row=24, column=0)
 tk.Button(root, text="보통", command=set_profile_normal, bg="#FFF176", activebackground="#FFEE58", fg="black", font=("맑은 고딕", 9)).grid(row=24, column=1)
@@ -3851,6 +3868,17 @@ def load_repeat_time():
     if raw.isdigit():
         repeat_time_var.set(int(raw))
 
+def get_delay_variables():
+    return {
+        "click": click_delay_var,
+        "press": press_delay_var,
+        "page": page_delay_var,
+        "payment": pay_delay_var,
+        "calendar": calendar_delay_var,
+        "court": court_delay_var,
+    }
+
+
 def save_ui_state():
     data = {
         "hour": hour_var.get(),
@@ -3865,15 +3893,79 @@ def save_ui_state():
         "repeat_exec_sec": repeat_exec_sec_var.get(),
         "list_repeat_count": list_repeat_count_var.get(),
     }
+    delays = {}
+    for name, variable in get_delay_variables().items():
+        try:
+            value = variable.get()
+        except (tk.TclError, ValueError) as error:
+            print(f"[DELAY-SAVE-FAIL] {name}: 숫자 입력 오류 ({error})")
+            continue
+        if not math.isfinite(value) or value < 0:
+            print(f"[DELAY-SAVE-FAIL] {name}: 0 이상의 유한한 값이 필요합니다 ({value})")
+            continue
+        delays[name] = value
+    data["delays"] = delays
+    delay_profile_values[active_delay_profile].update(delays)
+    data["delay_profiles"] = delay_profile_values
+    data["active_delay_profile"] = active_delay_profile
     with open(UI_STATE_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False)
 
 def load_ui_state():
+    global active_delay_profile
     if not os.path.exists(UI_STATE_FILE):
         return
 
     with open(UI_STATE_FILE, "r", encoding="utf-8") as f:
         data = json.load(f)
+
+    profiles = data.get("delay_profiles", {})
+    if isinstance(profiles, dict):
+        for mode, values in profiles.items():
+            if mode not in delay_profile_values or not isinstance(values, dict):
+                print(f"[PROFILE-LOAD-FAIL] 잘못된 프로필: {mode}")
+                continue
+            for name, value in values.items():
+                if (
+                    name not in delay_profile_values[mode]
+                    or isinstance(value, bool)
+                    or not isinstance(value, (int, float))
+                    or not math.isfinite(value)
+                    or value < 0
+                ):
+                    print(f"[PROFILE-LOAD-FAIL] {mode}/{name}: {value!r}")
+                    continue
+                delay_profile_values[mode][name] = value
+    else:
+        print("[PROFILE-LOAD-FAIL] 프로필 설정 형식 오류")
+    saved_mode = data.get("active_delay_profile", active_delay_profile)
+    if isinstance(saved_mode, str) and saved_mode in delay_profile_values:
+        active_delay_profile = saved_mode
+    else:
+        print(f"[PROFILE-LOAD-FAIL] 잘못된 선택 프로필: {saved_mode!r}")
+    for name, variable in get_delay_variables().items():
+        variable.set(delay_profile_values[active_delay_profile][name])
+    delays = (
+        delay_profile_values[active_delay_profile]
+        if "delay_profiles" in data else data.get("delays", {})
+    )
+    if not isinstance(delays, dict):
+        print("[DELAY-LOAD-FAIL] 딜레이 설정 형식 오류 - 프로필 기본값 유지")
+        delays = {}
+    for name, variable in get_delay_variables().items():
+        if name not in delays:
+            continue
+        value = delays[name]
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or value < 0
+        ):
+            print(f"[DELAY-LOAD-FAIL] {name}: 잘못된 값 {value!r} - 프로필 기본값 유지")
+            continue
+        variable.set(value)
+        delay_profile_values[active_delay_profile][name] = value
 
     hour = str(data.get("hour", "")).strip()
     minute = str(data.get("min", "")).strip()
@@ -4062,19 +4154,17 @@ def load_repeat_settings():
             f.write("OFF")
 
 def load_profile_settings():
-    if not os.path.exists(settings_path("profile_settings.txt")):
-        set_profile_fast()
-        return
-    with open(settings_path("profile_settings.txt"), "r") as f:
-        mode = f.read().strip()
-    if mode == "FAST":
-        set_profile_fast()
-    elif mode == "NORMAL":
-        set_profile_normal()
-    elif mode == "SAFE":
-        set_profile_safe()
-    else:
-        set_profile_fast()
+    global active_delay_profile
+    mode = "FAST"
+    if os.path.exists(settings_path("profile_settings.txt")):
+        with open(settings_path("profile_settings.txt"), "r") as f:
+            mode = f.read().strip()
+    if mode not in delay_profile_values:
+        print(f"[PROFILE-LOAD-FAIL] 알 수 없는 모드 {mode!r} - FAST 사용")
+        mode = "FAST"
+    active_delay_profile = mode
+    for name, variable in get_delay_variables().items():
+        variable.set(delay_profile_values[mode][name])
 
 def load_calendar_settings():
     if not os.path.exists(settings_path("calendar_settings.txt")):
