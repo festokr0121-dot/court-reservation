@@ -19,7 +19,7 @@ from tkcalendar import Calendar
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 REFRESH_FOCUS_X = 766
 REFRESH_FOCUS_Y = 373
-REFRESH_PRE_F5_DELAY_SEC = 0.40
+REFRESH_PRE_F5_DELAY_SEC = 0.25
 AUTO_START_FIRST_CLICK_X = 235
 AUTO_START_FIRST_CLICK_Y = 325
 AUTO_START_AFTER_FIRST_CLICK_DELAY_SEC = 0.1
@@ -37,8 +37,8 @@ AUTO_START_RETRY_CLICK_DELAY_SEC = 0.1
 AUTO_START_NEXT_MONTH_CLICK_X = 682
 AUTO_START_NEXT_MONTH_CLICK_Y = 675
 AUTO_START_AFTER_NEXT_CLICK_DELAY_SEC = 0.1
-AUTO_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.3
-MANUAL_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.3
+AUTO_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.15
+MANUAL_START_AFTER_PAGE_DOWN_DELAY_SEC = 0.15
 MANUAL_START_POPUP_CLOSE_TIMEOUT_SEC = 1.0
 MANUAL_POPUP_RECLICK_DELAY_SEC = 0.1
 MANUAL_ERROR_POPUP_POSITION = (665, 207)
@@ -46,10 +46,10 @@ MANUAL_ERROR_POPUP_COLOR = (39, 35, 32)
 MANUAL_ERROR_POPUP_HOVER_COLOR = (0, 0, 0)
 MANUAL_DEV_POPUP_POSITION = (579, 705)
 MANUAL_DEV_POPUP_COLOR = (240, 248, 255)
-MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC = 0.3
-AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC = 0.3
-AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC = 0.3
-AUTO_START_PAGE_UP_RETRY_DELAY_SEC = 0.3
+MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC = 0.15
+AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC = 0.15
+AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC = 0.15
+AUTO_START_PAGE_UP_RETRY_DELAY_SEC = 0.15
 AUTO_RECOVERY_ENABLED = True
 STARTUP_STRONG_PRECHECK_ENABLED = True
 RESERVATION_LIGHT_CHECK_ENABLED = True
@@ -59,7 +59,7 @@ RECOVERY_WARMUP_DELAY_SEC = 0.03
 # ============================
 # 창 열림 색상감지 시간(한곳 관리)
 # ============================
-TIME_WINDOW_OPEN_TIMEOUT_SEC = 0.35
+TIME_WINDOW_OPEN_TIMEOUT_SEC = 0.50
 COURT_WINDOW_OPEN_TIMEOUT_SEC = 1.0
 USAGE_WINDOW_OPEN_TIMEOUT_SEC = 1.0
 PEOPLE_WINDOW_OPEN_TIMEOUT_SEC = 1.0
@@ -72,22 +72,29 @@ PAYMENT_WINDOW_CLOSE_TIMEOUT_SEC = 1.0
 PAYMENT_WINDOW_OPEN_RETRY_TIMEOUT_SEC = 1.0
 PAYMENT_WINDOW_OPEN_FINAL_TIMEOUT_SEC = 1.0
 WINDOW_DETECT_POLL_INTERVAL_SEC = 0.005
-SAFE_SLEEP_TICK_SEC = 1.0 / 60.0
-NEXT_RESERVATION_TRANSITION_DELAY_SEC = 0.10
+SAFE_SLEEP_TICK_SEC = 1.0 / 120.0
+NEXT_RESERVATION_TRANSITION_DELAY_SEC = 0.06
 DATE_CLICK_PREP_DELAY_SEC = 0.01
-DATE_CLICK_BEFORE_CLICK_DELAY_SEC = 0.02
+DATE_CLICK_BEFORE_CLICK_DELAY_SEC = 0.01
 TIME_WINDOW_OPEN_MAX_RETRIES = 1
 WINDOW_OPEN_MARKER_MAX_WAIT_SEC = 0.5
 WINDOW_OPEN_RETRY_DELAY_SEC = 0.03
 TIME_WINDOW_CANCEL_MAX_ATTEMPTS = 2
 TIME_WINDOW_OPEN_RETRY_GAP_SEC = 0.01
-TIME_WINDOW_OPEN_TIMEOUT_STEPS_SEC = [0.35, 0.50]
+TIME_WINDOW_OPEN_TIMEOUT_STEPS_SEC = [0.50, 0.50]
 TIME_WINDOW_USE_BRIGHTNESS_FALLBACK = False
+# Extra marker-only wait after a failed open check, to catch slow-opening time windows.
+TIME_WINDOW_LATE_OPEN_GRACE_SEC = 0.5
+# Same extra marker-only wait for the court/usage/people/payment windows.
+WINDOW_LATE_OPEN_GRACE_SEC = 0.5
 NEXT_RESERVATION_AFTER_ESC = "NEXT_RESERVATION_AFTER_ESC"
 PEOPLE_STAGE_TEST_LOG_ENABLED = False
 WINDOW_OPEN_STABLE_HITS = 1
 WINDOW_CLOSE_STABLE_HITS = 2
 WINDOW_TRANSITION_MAX_RECLICKS = 2
+AUTO_F2_TICK_MS = 100
+AUTO_REPEAT_TICK_MS = 200
+ESC_POLL_TICK_MS = 20
 PAYMENT_WINDOW_MARKERS = [
     (492, 899),
     (574, 893),
@@ -117,6 +124,7 @@ PEOPLE_WINDOW_MARKERS = [
     (579, 830),
 ]
 PEOPLE_WINDOW_MARKER_REQUIRED_HITS = 1
+POPUP_ESC_INTERVAL_SEC = 0.1
 
 
 def ensure_admin():
@@ -192,10 +200,33 @@ def os_click(x, y):
 # ============================
 # ★ 초고속 픽셀 읽기 엔진 ★
 # ============================
+_screen_hdc = None
+
+
+def _get_screen_hdc():
+    global _screen_hdc
+    if _screen_hdc is None:
+        _screen_hdc = ctypes.windll.user32.GetDC(0)
+    return _screen_hdc
+
+
+def release_screen_hdc():
+    global _screen_hdc
+    if _screen_hdc is not None:
+        ctypes.windll.user32.ReleaseDC(0, _screen_hdc)
+        _screen_hdc = None
+
+
 def fast_pixel(x, y):
-    hdc = ctypes.windll.user32.GetDC(0)
+    hdc = _get_screen_hdc()
     color = ctypes.windll.gdi32.GetPixel(hdc, x, y)
-    ctypes.windll.user32.ReleaseDC(0, hdc)
+    if color == 0xFFFFFFFF:
+        # DC가 무효 상태인 경우 1회 재획득 후 재시도한다.
+        release_screen_hdc()
+        hdc = _get_screen_hdc()
+        color = ctypes.windll.gdi32.GetPixel(hdc, x, y)
+        if color == 0xFFFFFFFF:
+            return 0, 0, 0
     r = color & 0xff
     g = (color >> 8) & 0xff
     b = (color >> 16) & 0xff
@@ -255,6 +286,77 @@ _warmup_busy = False
 _warmup_last_check = None
 _warmup_setting = None
 _reservation_activity = 0
+_run_summary = None
+
+
+def start_run_summary(label):
+    global _run_summary
+    _run_summary = {
+        "label": label,
+        "started_at": datetime.datetime.now(),
+        "attempts": 0,
+        "success": 0,
+        "next": 0,
+        "fail": 0,
+        "durations": [],
+        "time_window_fail": 0,
+        "stage_fail": {},
+        "printed": False,
+    }
+
+
+def record_run_attempt(result, elapsed_sec, had_exception=False):
+    if _run_summary is None:
+        return
+    _run_summary["attempts"] += 1
+    _run_summary["durations"].append(max(0.0, float(elapsed_sec)))
+    if result in ("DONE", "NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
+        _run_summary["success"] += 1
+        if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
+            _run_summary["next"] += 1
+    else:
+        # STOP 및 예외 종료, 기타 비정상 결과는 실패로 집계한다.
+        _run_summary["fail"] += 1
+
+
+def record_time_window_open_result(matched):
+    if _run_summary is None:
+        return
+    if not matched:
+        _run_summary["time_window_fail"] += 1
+
+
+def record_run_stage_fail(stage):
+    if _run_summary is None:
+        return
+    stage_fail = _run_summary["stage_fail"]
+    stage_fail[stage] = stage_fail.get(stage, 0) + 1
+
+
+def print_run_summary_once(reason):
+    if _run_summary is None or _run_summary.get("printed"):
+        return
+
+    durations = _run_summary["durations"]
+    avg_sec = (sum(durations) / len(durations)) if durations else 0.0
+    max_sec = max(durations) if durations else 0.0
+    total_elapsed = (datetime.datetime.now() - _run_summary["started_at"]).total_seconds()
+    stage_fail = _run_summary["stage_fail"]
+    stage_fail_text = ",".join(
+        f"{stage}:{stage_fail[stage]}"
+        for stage in ("time", "court", "usage", "people", "payment")
+        if stage_fail.get(stage)
+    ) or "none"
+    print(
+        "[RUN-SUMMARY] "
+        f"label={_run_summary['label']} reason={reason} "
+        f"attempts={_run_summary['attempts']} success={_run_summary['success']} next={_run_summary['next']} fail={_run_summary['fail']} "
+        f"avg_sec={avg_sec:.3f} max_sec={max_sec:.3f} "
+        f"time_window_fail={_run_summary['time_window_fail']} "
+        f"stage_fail={sum(stage_fail.values())}[{stage_fail_text}] "
+        f"elapsed_sec={total_elapsed:.3f}"
+    )
+    _run_summary["printed"] = True
 
 
 def track_reservation_activity(function):
@@ -573,11 +675,16 @@ def wait_for_window_open_detection(
     save_diagnostic=True,
     use_ocr=True,
 ):
-    """Poll markers at a fixed interval for at most 0.5s, then use one OCR fallback."""
+    """Poll markers at a fixed interval, then use one OCR fallback.
+
+    Only the time window is capped at WINDOW_OPEN_MARKER_MAX_WAIT_SEC (its late-open
+    grace handles slow opens); other windows wait their full configured timeout.
+    """
     start = time.monotonic()
-    marker_deadline = start + min(
-        max(0.0, timeout), WINDOW_OPEN_MARKER_MAX_WAIT_SEC
-    )
+    marker_wait = max(0.0, timeout)
+    if window == "time":
+        marker_wait = min(marker_wait, WINDOW_OPEN_MARKER_MAX_WAIT_SEC)
+    marker_deadline = start + marker_wait
     next_marker_check = start
     samples = []
     ocr_detail = "not_run"
@@ -643,14 +750,54 @@ def wait_for_window_open_detection(
     return False, samples, result_detail
 
 
+def wait_for_window_late_open(window, detector, debug):
+    """After a failed open check, poll markers briefly for a late-opening window.
+
+    Returns True if the window opened, False if it stayed closed, None if interrupted.
+    """
+    start = time.monotonic()
+    deadline = start + WINDOW_LATE_OPEN_GRACE_SEC
+    checks = 0
+    while True:
+        if emergency_stop:
+            return None
+        checks += 1
+        if detector():
+            print(
+                f"[WINDOW-LATE-OPEN] window={window} result=PASS "
+                f"elapsed={time.monotonic() - start:.3f}s checks={checks} "
+                f"markers=[{debug()}] → 단계 계속 진행"
+            )
+            return True
+        if time.monotonic() >= deadline:
+            break
+        if not safe_sleep(WINDOW_OPEN_RETRY_DELAY_SEC):
+            return None
+    print(
+        f"[WINDOW-LATE-OPEN] window={window} result=FAIL "
+        f"grace={WINDOW_LATE_OPEN_GRACE_SEC:.2f}s checks={checks} "
+        f"markers=[{debug()}]"
+    )
+    return False
+
+
 def wait_for_named_window_open(window, detector, debug, timeout):
     matched, _, detail = wait_for_window_open_detection(
-        window, lambda: (detector(), []), timeout
+        window, lambda: (detector(), []), timeout, save_diagnostic=False
     )
     log_color_detection(
         f"{window}-window", matched, detail=f"{detail} markers=[{debug()}]"
     )
-    return matched
+    if matched:
+        return True
+    if emergency_stop:
+        return False
+    late_open = wait_for_window_late_open(window, detector, debug)
+    if late_open:
+        return True
+    if late_open is False and not emergency_stop:
+        save_window_detection_diagnostic(window, detail)
+    return False
 
 
 def rgb_to_hsv_deg(r, g, b):
@@ -1044,24 +1191,92 @@ def close_popup_with_esc(method="keyboard"):
             pyautogui.press("esc")
         else:
             keyboard.send("esc")
-        time.sleep(0.1)
+        time.sleep(POPUP_ESC_INTERVAL_SEC)
     return True
 
-def cancel_time_selection_with_fallback():
-    """Cancel the time window with ESC and verify it closed before continuing."""
-    for attempt in range(TIME_WINDOW_CANCEL_MAX_ATTEMPTS):
-        if not close_popup_with_esc():
-            return False
-        if wait_for_time_window_close(timeout=TIME_WINDOW_CLOSE_TIMEOUT_SEC):
-            return True
-        if attempt < TIME_WINDOW_CANCEL_MAX_ATTEMPTS - 1:
-            print("[TIME-CANCEL] 시간창 닫힘 미확인 - ESC 취소 재시도")
+STAGE_WINDOW_CLOSE_BUTTONS = {
+    "time": (682, 206),
+    "court": (681, 162),
+    "usage": (682, 193),
+    "people": (681, 182),
+    "payment": (683, 117),
+}
+STAGE_WINDOW_X_CLICK_MAX_ATTEMPTS = 2
+STAGE_WINDOW_CLOSE_CHECK_ORDER = ("payment", "people", "usage", "court", "time")
 
-    print("[TIME-CANCEL-FAIL] 시간창이 닫히지 않아 마우스 입력 없이 예약 실행을 중단합니다")
+
+def _stage_window_functions(stage):
+    """Return (detect_open, wait_close) for a reservation stage window."""
+    return {
+        "time": (detect_time_window_open, wait_for_time_window_close),
+        "court": (detect_court_window_open, wait_for_court_window_close),
+        "usage": (detect_usage_window_open, wait_for_usage_window_close),
+        "people": (detect_people_window_open, wait_for_people_window_close),
+        "payment": (detect_payment_window_open, wait_for_payment_window_close),
+    }[stage]
+
+
+def _stage_windows_closed(stage):
+    """Wait until both the given stage window and the time window are closed."""
+    _, wait_stage_close = _stage_window_functions(stage)
+    if stage != "time" and not wait_stage_close():
+        return False
+    return wait_for_time_window_close(timeout=TIME_WINDOW_CLOSE_TIMEOUT_SEC)
+
+
+def close_stage_window_by_x(stage):
+    """Click the stage window's X button and verify that window closed."""
+    x, y = STAGE_WINDOW_CLOSE_BUTTONS[stage]
+    detect_open, wait_close = _stage_window_functions(stage)
+    for attempt in range(1, STAGE_WINDOW_X_CLICK_MAX_ATTEMPTS + 1):
+        if emergency_stop:
+            return False
+        if not detect_open():
+            return True
+        print(f"[WINDOW-X] stage={stage} X 클릭 coord=({x},{y}) attempt={attempt}")
+        if not safe_click(x, y):
+            return False
+        if wait_close():
+            print(f"[WINDOW-X] stage={stage} 닫힘 확인 attempt={attempt}")
+            return True
+    print(f"[WINDOW-X] stage={stage} X 클릭 후에도 닫힘 미확인")
     return False
 
-TIME_WINDOW_CLOSE_BUTTON_X = 681
-TIME_WINDOW_CLOSE_BUTTON_Y = 207
+
+def close_stage_window_with_fallback(stage="time"):
+    """ESC twice; if the window stays open, click each open stage window's X button."""
+    if not close_popup_with_esc():
+        return False
+    if _stage_windows_closed(stage):
+        print(f"[WINDOW-CLOSE] stage={stage} ESC로 닫힘 확인 → 다음 예약")
+        return True
+    if emergency_stop:
+        return False
+
+    print(f"[WINDOW-CLOSE] stage={stage} ESC로 닫힘 미확인 → 단계별 X 버튼 클릭")
+    order = (stage,) + tuple(s for s in STAGE_WINDOW_CLOSE_CHECK_ORDER if s != stage)
+    for open_stage in order:
+        if emergency_stop:
+            return False
+        detect_open, _ = _stage_window_functions(open_stage)
+        if detect_open():
+            close_stage_window_by_x(open_stage)
+
+    if _stage_windows_closed(stage):
+        print(f"[WINDOW-CLOSE] stage={stage} X 버튼으로 닫힘 확인 → 다음 예약")
+        return True
+    print(
+        f"[WINDOW-CLOSE-FAIL] stage={stage} ESC/X 모두 닫힘 미확인 "
+        f"time_markers=[{get_time_marker_debug()}] - 다음 예약 클릭 없이 중단합니다"
+    )
+    return False
+
+
+def cancel_time_selection_with_fallback(stage="time"):
+    """Close the current reservation window (ESC, then X button) before continuing."""
+    return close_stage_window_with_fallback(stage)
+
+TIME_WINDOW_CLOSE_BUTTON_X, TIME_WINDOW_CLOSE_BUTTON_Y = STAGE_WINDOW_CLOSE_BUTTONS["time"]
 TIME_WINDOW_CLOSE_CLICK_MAX_ATTEMPTS = 2
 TIME_WINDOW_CANCEL_COORDINATES = ((410, 810), (410, 760))
 
@@ -1104,20 +1319,8 @@ def cancel_time_window_by_coordinates_and_continue():
 
 
 def cancel_time_window_and_continue():
-    """Send ESC twice, verify the time window closed, then allow the next reservation."""
-    for attempt, method in enumerate(("keyboard", "pyautogui", "pyautogui"), start=1):
-        if not close_popup_with_esc(method=method):
-            return False
-        if wait_for_time_window_close(timeout=TIME_WINDOW_CLOSE_TIMEOUT_SEC):
-            print(f"[TIME-CANCEL] 시간창 닫힘 확인 attempt={attempt} → 처음부터시작")
-            return True
-        print(
-            f"[TIME-CANCEL] 시간창 닫힘 미확인 attempt={attempt} "
-            f"markers=[{get_time_marker_debug()}] - ESC 재시도"
-        )
-
-    print("[TIME-CANCEL-FAIL] ESC로 시간창이 닫히지 않아 다음 예약 클릭 없이 중단합니다")
-    return False
+    """Send ESC twice; if the time window stays open, click its X button."""
+    return close_stage_window_with_fallback("time")
 
 def reset_after_reservation():
     """결제 완료 후 다음 예약이 달력 화면에서 시작되도록 모달을 닫는다."""
@@ -1177,6 +1380,7 @@ TIME_WINDOW_OPEN_COLOR = (56, 90, 155)
 TIME_AVAILABLE_COLORS = [TARGET_COLOR, (56, 89, 153)]
 TIME_AVAILABLE_HSV_COLORS = [rgb_to_hsv_deg(*c) for c in TIME_AVAILABLE_COLORS]
 WINDOW_OPEN_HSV = rgb_to_hsv_deg(*WINDOW_OPEN_COLOR)
+TIME_WINDOW_OPEN_HSV = rgb_to_hsv_deg(*TIME_WINDOW_OPEN_COLOR)
 SELECTED_HSV = rgb_to_hsv_deg(*SELECTED_COLOR)
 
 # ============================
@@ -1353,13 +1557,13 @@ def _to_float(value, fallback):
 
 
 def _sanitize_timeout(value, baseline):
-    return round(_clamp(_to_float(value, baseline), 0.35, 2.20), 2)
+    return round(_clamp(_to_float(value, baseline), 0.50, 2.20), 2)
 
 
 def _stage_baselines():
     return {
         "time": {
-            "open_a": 0.35,
+            "open_a": 0.50,
             "open_b": 0.50,
         },
         "court": {
@@ -1424,9 +1628,9 @@ def apply_calibration_runtime():
     adaptive = calibration_state.get("adaptive", {})
     baseline = calibration_state.get("baseline", _stage_baselines())
 
-    t_base = baseline.get("time", {"open_a": 0.35, "open_b": 0.50})
+    t_base = baseline.get("time", {"open_a": 0.50, "open_b": 0.50})
     t_adapt = adaptive.get("time", dict(t_base))
-    ta = _sanitize_timeout(t_adapt.get("open_a", t_base.get("open_a", 0.35)), t_base.get("open_a", 0.35))
+    ta = _sanitize_timeout(t_adapt.get("open_a", t_base.get("open_a", 0.50)), t_base.get("open_a", 0.50))
     tb = _sanitize_timeout(t_adapt.get("open_b", t_base.get("open_b", 0.50)), t_base.get("open_b", 0.50))
     if tb < ta:
         tb = ta
@@ -1469,6 +1673,9 @@ def load_calibration_state():
                         state[key].update(raw[key])
         except Exception:
             state = default_calibration_state()
+
+    # Saved baselines can be stale; always use the code-defined minimums.
+    state["baseline"] = _stage_baselines()
 
     for stage in ("time", "court", "usage", "people", "payment"):
         hist = state.get("history", {}).get(stage, [])
@@ -1529,6 +1736,8 @@ def _update_stage_adaptive(stage):
 def record_stage_outcome(stage, ok):
     if stage not in ("time", "court", "usage", "people", "payment"):
         return
+    if not ok:
+        record_run_stage_fail(stage)
 
     hist = calibration_state["history"][stage]
     hist.append(bool(ok))
@@ -1642,21 +1851,22 @@ def people_test_log(msg):
         print(msg)
 
 
-def is_window_marker_open(x, y, target_color=WINDOW_OPEN_COLOR):
-    matched, _, _ = color_match_area(
-        x,
-        y,
-        target_color,
-        tol=18,
-        radius=0,
-        min_hits=1,
-        use_strong=False,
-        hsv_targets=[rgb_to_hsv_deg(*target_color)],
+def _is_window_marker_open_from_rgb(rgb, target_color, target_hsv):
+    r, g, b = rgb
+    if color_close(r, g, b, target_color, tol=18):
+        return True
+    return hsv_close(
+        rgb_to_hsv_deg(r, g, b),
+        target_hsv,
         h_tol=20.0,
         s_tol=0.35,
         v_tol=0.35,
     )
-    return matched
+
+
+def is_window_marker_open(x, y, target_color=WINDOW_OPEN_COLOR):
+    target_hsv = WINDOW_OPEN_HSV if target_color == WINDOW_OPEN_COLOR else rgb_to_hsv_deg(*target_color)
+    return _is_window_marker_open_from_rgb(fast_pixel(x, y), target_color, target_hsv)
 
 
 def detect_payment_window_open(required_hits=PAYMENT_WINDOW_MARKER_REQUIRED_HITS):
@@ -1675,15 +1885,11 @@ def sample_time_window_markers(required_hits=TIME_WINDOW_MARKER_REQUIRED_HITS):
     samples = []
     for mx, my in TIME_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        matched = color_close(r, g, b, TIME_WINDOW_OPEN_COLOR, tol=18)
-        if not matched:
-            matched = hsv_close(
-                rgb_to_hsv_deg(r, g, b),
-                rgb_to_hsv_deg(*TIME_WINDOW_OPEN_COLOR),
-                h_tol=20.0,
-                s_tol=0.35,
-                v_tol=0.35,
-            )
+        matched = _is_window_marker_open_from_rgb(
+            (r, g, b),
+            TIME_WINDOW_OPEN_COLOR,
+            TIME_WINDOW_OPEN_HSV,
+        )
         samples.append((mx, my, (r, g, b), matched))
         if matched:
             hits += 1
@@ -1739,7 +1945,7 @@ def get_payment_marker_debug():
     parts = []
     for mx, my in PAYMENT_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        open_flag = is_window_marker_open(mx, my)
+        open_flag = _is_window_marker_open_from_rgb((r, g, b), WINDOW_OPEN_COLOR, WINDOW_OPEN_HSV)
         parts.append(f"({mx},{my}):RGB=({r},{g},{b}) open={open_flag}")
     return " | ".join(parts)
 
@@ -1749,7 +1955,7 @@ def get_time_marker_debug():
     parts = []
     for mx, my in TIME_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        open_flag = is_window_marker_open(mx, my)
+        open_flag = _is_window_marker_open_from_rgb((r, g, b), WINDOW_OPEN_COLOR, WINDOW_OPEN_HSV)
         parts.append(f"({mx},{my}):RGB=({r},{g},{b}) open={open_flag}")
     return " | ".join(parts)
 
@@ -1759,7 +1965,7 @@ def get_court_marker_debug():
     parts = []
     for mx, my in COURT_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        open_flag = is_window_marker_open(mx, my)
+        open_flag = _is_window_marker_open_from_rgb((r, g, b), WINDOW_OPEN_COLOR, WINDOW_OPEN_HSV)
         parts.append(f"({mx},{my}):RGB=({r},{g},{b}) open={open_flag}")
     return " | ".join(parts)
 
@@ -1769,7 +1975,7 @@ def get_usage_marker_debug():
     parts = []
     for mx, my in USAGE_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        open_flag = is_window_marker_open(mx, my)
+        open_flag = _is_window_marker_open_from_rgb((r, g, b), WINDOW_OPEN_COLOR, WINDOW_OPEN_HSV)
         parts.append(f"({mx},{my}):RGB=({r},{g},{b}) open={open_flag}")
     return " | ".join(parts)
 
@@ -1779,7 +1985,7 @@ def get_people_marker_debug():
     parts = []
     for mx, my in PEOPLE_WINDOW_MARKERS:
         r, g, b = fast_pixel(mx, my)
-        open_flag = is_window_marker_open(mx, my)
+        open_flag = _is_window_marker_open_from_rgb((r, g, b), WINDOW_OPEN_COLOR, WINDOW_OPEN_HSV)
         parts.append(f"({mx},{my}):RGB=({r},{g},{b}) open={open_flag}")
     return " | ".join(parts)
 
@@ -1944,6 +2150,38 @@ def wait_for_time_window_open(timeout=TIME_WINDOW_OPEN_TIMEOUT_SEC, use_ocr=True
     return matched, samples
 
 
+def wait_for_time_window_late_open(log_context=""):
+    """After a failed open check, keep polling markers briefly for a late-opening window.
+
+    Returns True if the window opened, False if it stayed closed, None if interrupted.
+    """
+    start = time.monotonic()
+    deadline = start + TIME_WINDOW_LATE_OPEN_GRACE_SEC
+    checks = 0
+    context_text = f"context={log_context} " if log_context else ""
+    while True:
+        if emergency_stop:
+            return None
+        checks += 1
+        if detect_time_window_open():
+            print(
+                f"[TIME-LATE-OPEN] {context_text}result=PASS "
+                f"elapsed={time.monotonic() - start:.3f}s checks={checks} "
+                f"markers=[{get_time_marker_debug()}] → 시간 선택 계속 진행"
+            )
+            return True
+        if time.monotonic() >= deadline:
+            break
+        if not safe_sleep(WINDOW_OPEN_RETRY_DELAY_SEC):
+            return None
+    print(
+        f"[TIME-LATE-OPEN] {context_text}result=FAIL "
+        f"grace={TIME_WINDOW_LATE_OPEN_GRACE_SEC:.2f}s checks={checks} "
+        f"markers=[{get_time_marker_debug()}]"
+    )
+    return False
+
+
 def wait_for_time_window_ready(
     max_attempts=TIME_WINDOW_OPEN_MAX_RETRIES,
     log_context="",
@@ -1985,9 +2223,18 @@ def wait_for_time_window_ready(
             ),
         )
         if marker_open or bright_open:
+            record_time_window_open_result(True)
             return True
         if not safe_sleep(TIME_WINDOW_OPEN_RETRY_GAP_SEC):
             return False
+    if max_attempts > 0 and not emergency_stop:
+        late_open = wait_for_time_window_late_open(log_context)
+        if late_open is None:
+            return False
+        if late_open:
+            record_time_window_open_result(True)
+            return True
+    record_time_window_open_result(False)
     if save_diagnostic_on_failure and not emergency_stop:
         save_window_detection_diagnostic(
             "time",
@@ -2147,7 +2394,9 @@ def wait_for_payment_window(timeout=PAYMENT_WINDOW_OPEN_TIMEOUT_SEC):
         people_open = detect_people_window_open()
         return payment_open and not people_open, []
 
-    matched, _, detail = wait_for_window_open_detection("payment", sample, timeout)
+    matched, _, detail = wait_for_window_open_detection(
+        "payment", sample, timeout, save_diagnostic=False
+    )
     log_color_detection(
         "payment-window",
         matched,
@@ -2157,7 +2406,23 @@ def wait_for_payment_window(timeout=PAYMENT_WINDOW_OPEN_TIMEOUT_SEC):
             f"people_markers=[{get_people_marker_debug()}]"
         ),
     )
-    return matched
+    if matched:
+        return True
+    if emergency_stop:
+        return False
+    late_open = wait_for_window_late_open(
+        "payment",
+        lambda: sample()[0],
+        lambda: (
+            f"payment=[{get_payment_marker_debug()}] "
+            f"people=[{get_people_marker_debug()}]"
+        ),
+    )
+    if late_open:
+        return True
+    if late_open is False and not emergency_stop:
+        save_window_detection_diagnostic("payment", detail)
+    return False
 
 
 def wait_for_payment_window_close(
@@ -2623,9 +2888,9 @@ def run_reservation(res, time_window_confirmed=False):
     def close_failed_window_and_skip(stage_name):
         print(
             f"[WINDOW-OPEN-FAIL] stage={stage_name} "
-            "marker_checks=3 ocr_checks=1 → ESC 정리 후 다음 예약"
+            "→ ESC/X 정리 후 다음 예약 (확인 횟수는 위 window/LATE-OPEN 로그 참고)"
         )
-        if not cancel_time_selection_with_fallback():
+        if not cancel_time_selection_with_fallback(stage_name):
             return "STOP"
         return NEXT_RESERVATION_AFTER_ESC
 
@@ -2758,7 +3023,7 @@ def run_reservation(res, time_window_confirmed=False):
                 )
                 print(f"[FAIL] {target_court}번 코트 선택 색상 2회 클릭 후 미감지 - 다음 예약")
                 mark_stage("court", False)
-                cancel_time_selection_with_fallback()
+                cancel_time_selection_with_fallback("court")
                 return "NEXT_RESERVATION"
             safe_sleep(court_delay_var.get())
 
@@ -2970,7 +3235,7 @@ def run_reservation(res, time_window_confirmed=False):
                     if emergency_stop:
                         return "STOP"
                     mark_stage("payment", False)
-                    cancel_time_selection_with_fallback()
+                    cancel_time_selection_with_fallback("payment")
                     return "NEXT_RESERVATION"
                 safe_click(682, 125)
                 if not wait_for_payment_window_close(timeout=PAYMENT_WINDOW_CLOSE_TIMEOUT_SEC):
@@ -2989,7 +3254,7 @@ def run_reservation(res, time_window_confirmed=False):
                 if emergency_stop:
                     return "STOP"
                 mark_stage("payment", False)
-                cancel_time_selection_with_fallback()
+                cancel_time_selection_with_fallback("payment")
                 return "NEXT_RESERVATION"
             payment_transition_log = WhiteTransitionLogger(
                 "payment", PAYMENT_WINDOW_MARKERS
@@ -3038,6 +3303,7 @@ def run_selected():
 
     if running:
         return
+    start_run_summary("run_selected")
     running = True
     emergency_stop = False
     pause_requested = False
@@ -3073,20 +3339,30 @@ def run_selected():
         page_down_and_fix(res["date"], res["id"])
 
     status.set(f"{res['id']}번 예약 시작 ({res['date']} {res['time']})")
-    result = run_reservation(res)
+    started_at = time.monotonic()
+    try:
+        result = run_reservation(res)
+    except Exception:
+        record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+        print_run_summary_once("run_selected_exception")
+        raise
+    record_run_attempt(result, time.monotonic() - started_at)
 
     if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
         status.set(f"{res['id']}번 예약 불가")
         running = False
+        print_run_summary_once("run_selected_end")
         return
 
     if emergency_stop:
         status.set("⛔ ESC로 전체 실행 취소됨")
         running = False
+        print_run_summary_once("run_selected_end")
         return "STOP"
 
     tree.item(item, tags=("done",))
     running = False
+    print_run_summary_once("run_selected_end")
 
 # ============================
 # 전체 예약 실행
@@ -3656,12 +3932,14 @@ def run_reservation_items(
     auto_start_date_clicked,
     pending_only,
 ):
+    start_run_summary(f"run_reservation_items:repeat={repeat_count},pending={int(bool(pending_only))}")
     for round_idx in range(repeat_count):
         round_ended_after_esc = False
         for index, item in enumerate(items):
 
             if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
+                print_run_summary_once("run_reservation_items_end")
                 return
             if pending_only and "done" in tree.item(item)["tags"]:
                 continue
@@ -3687,10 +3965,24 @@ def run_reservation_items(
                 page_down_and_fix(res["date"], res["id"])
 
             if auto_start_date_clicked and round_idx == 0 and index == 0:
-                result = run_reservation(res, time_window_confirmed=True)
+                started_at = time.monotonic()
+                try:
+                    result = run_reservation(res, time_window_confirmed=True)
+                except Exception:
+                    record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+                    print_run_summary_once("run_reservation_items_exception")
+                    raise
             else:
-                result = run_reservation(res)
+                started_at = time.monotonic()
+                try:
+                    result = run_reservation(res)
+                except Exception:
+                    record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+                    print_run_summary_once("run_reservation_items_exception")
+                    raise
+            record_run_attempt(result, time.monotonic() - started_at)
             if result == "MANUAL_LIST_FINISHED":
+                print_run_summary_once("run_reservation_items_end")
                 return True
             round_ended_after_esc = result == NEXT_RESERVATION_AFTER_ESC
 
@@ -3698,6 +3990,7 @@ def run_reservation_items(
                 if result == "NEXT_RESERVATION" and index < len(items) - 1:
                     if not reset_after_reservation():
                         status.set("❌ 예약창 정리 실패 - 마우스 입력 없이 자동 실행 중지")
+                        print_run_summary_once("run_reservation_items_end")
                         return
                 elif (
                     result == NEXT_RESERVATION_AFTER_ESC
@@ -3705,6 +3998,7 @@ def run_reservation_items(
                     and not wait_for_next_reservation_transition()
                 ):
                     status.set("⚠ ESC로 취소됨")
+                    print_run_summary_once("run_reservation_items_end")
                     return
                 continue
 
@@ -3714,7 +4008,9 @@ def run_reservation_items(
                     and index == len(items) - 1
                     and not emergency_stop
                 ):
+                    print_run_summary_once("run_reservation_items_end")
                     return True
+                print_run_summary_once("run_reservation_items_end")
                 return
 
             tree.item(item, tags=("done",))
@@ -3722,6 +4018,7 @@ def run_reservation_items(
             if index < len(items) - 1:
                 if not reset_after_reservation():
                     status.set("❌ 예약창 정리 실패 - 마우스 입력 없이 자동 실행 중지")
+                    print_run_summary_once("run_reservation_items_end")
                     return
 
         if (
@@ -3731,8 +4028,10 @@ def run_reservation_items(
         ):
             if not reset_after_reservation():
                 status.set("❌ 예약창 정리 실패 - 마우스 입력 없이 자동 실행 중지")
+                print_run_summary_once("run_reservation_items_end")
                 return
 
+    print_run_summary_once("run_reservation_items_end")
     return True
 
 
@@ -4051,7 +4350,8 @@ def build_process_coordinate_summary_text():
     lines.append(f"- 시간창 닫힘 대기: {TIME_WINDOW_CLOSE_TIMEOUT_SEC:.2f}초")
     lines.append(
         f"- 창 열림 감지: 마커 {WINDOW_OPEN_RETRY_DELAY_SEC:.2f}초 간격 "
-        f"최대 {WINDOW_OPEN_MARKER_MAX_WAIT_SEC:.2f}초, 이후 OCR 1회"
+        f"시간창 최대 {WINDOW_OPEN_MARKER_MAX_WAIT_SEC:.2f}초(다른 창은 각 열림 대기값), 이후 OCR 1회, "
+        f"실패 시 마커 {WINDOW_LATE_OPEN_GRACE_SEC:.2f}초 추가 확인"
     )
     lines.append("- 시간칸 클릭 조건: 클릭 좌표의 예약 가능 RGB 색상 2회 확인(재클릭 시에도 확인)")
     lines.append("- 기본/백업 시간칸 모두 미감지: 취소 좌표 (410,810), (410,760) 순으로 클릭 후 닫힘 확인")
@@ -4258,6 +4558,8 @@ ttk.Label(
 def on_close():
     global emergency_stop
     emergency_stop = True
+    print_run_summary_once("on_close")
+    release_screen_hdc()
     try:
         save_time_settings()
         save_repeat_time()
@@ -4536,7 +4838,7 @@ def auto_f2_tick():
     except Exception as e:
         print("auto_f2_tick 오류:", e)
 
-    root.after(200, auto_f2_tick)
+    root.after(AUTO_F2_TICK_MS, auto_f2_tick)
 
 
 def arm_scheduled_time_sync():
@@ -5102,18 +5404,22 @@ place_window_top_right()
 # 자동 반복 기능 (메인 루프 스케줄러)
 # ============================
 def run_auto_repeat_once():
+    start_run_summary("run_auto_repeat_once")
     if f2_mode_var.get() == "manual":
         start_on_enter(pending_only=True)
+        print_run_summary_once("run_auto_repeat_once_end")
         return
 
     now = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
     if not run_startup_strong_precheck():
         stop_all_automation("❌ 자동 반복 시작 전 환경 점검/보정 실패")
+        print_run_summary_once("run_auto_repeat_once_end")
         return
 
     if not focus_reservation_window():
         stop_all_automation("❌ 광명도시공사 창 인식 실패 - 자동 반복 중지")
+        print_run_summary_once("run_auto_repeat_once_end")
         return
 
     status.set(f"🔄 자동 반복 실행 — {now} (주기: {get_repeat_wait_seconds()}초)")
@@ -5146,18 +5452,27 @@ def run_auto_repeat_once():
         if not safe_sleep(calendar_delay_var.get()):
             break
 
-        result = run_reservation(res)
+        started_at = time.monotonic()
+        try:
+            result = run_reservation(res)
+        except Exception:
+            record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+            print_run_summary_once("run_auto_repeat_once_exception")
+            raise
+        record_run_attempt(result, time.monotonic() - started_at)
 
         if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
             status.set(f"{res['id']}번 예약 불가 → 다음으로 이동")
             root.update_idletasks()
             if result == "NEXT_RESERVATION" and not reset_after_reservation():
                 status.set("❌ 예약창 정리 실패 - 마우스 입력 없이 자동 실행 중지")
+                print_run_summary_once("run_auto_repeat_once_end")
                 return
             if (
                 result == NEXT_RESERVATION_AFTER_ESC
                 and not wait_for_next_reservation_transition()
             ):
+                print_run_summary_once("run_auto_repeat_once_end")
                 return
             continue
 
@@ -5167,12 +5482,14 @@ def run_auto_repeat_once():
         tree.item(item, tags=("done",))
         if not reset_after_reservation():
             status.set("❌ 예약창 정리 실패 - 마우스 입력 없이 자동 실행 중지")
+            print_run_summary_once("run_auto_repeat_once_end")
             return
 
     if emergency_stop:
         stop_all_automation("⛔ ESC로 전체 실행 취소됨")
     else:
         status.set("자동 반복 예약 1회 완료")
+    print_run_summary_once("run_auto_repeat_once_end")
 
 
 def get_pending_reservation_count():
@@ -5189,20 +5506,20 @@ def auto_repeat_tick():
     try:
         if pause_requested and (not emergency_stop):
             status.set("⏸ ESC 일시정지 중 - ESC 짧게 재개 / ESC 0.5초 이상 취소")
-            root.after(500, auto_repeat_tick)
+            root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
             return
 
         if f2_mode_var.get() == "auto":
             if not refresh_repeat_enabled:
                 next_auto_run_at = None
                 auto_repeat_armed = False
-                root.after(500, auto_repeat_tick)
+                root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
                 return
 
             if emergency_stop:
                 stop_all_automation("⛔ ESC로 전체 실행 취소됨")
                 next_auto_run_at = None
-                root.after(500, auto_repeat_tick)
+                root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
                 return
 
             stop_dt = get_refresh_stop_datetime()
@@ -5262,19 +5579,19 @@ def auto_repeat_tick():
                             scheduled_at, time.time(), refresh_seconds
                         )
 
-            root.after(500, auto_repeat_tick)
+            root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
             return
 
         if not is_auto_repeat_on():
             next_auto_run_at = None
             auto_repeat_armed = False
-            root.after(500, auto_repeat_tick)
+            root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
             return
 
         if emergency_stop:
             stop_all_automation("⛔ ESC로 전체 실행 취소됨")
             next_auto_run_at = None
-            root.after(500, auto_repeat_tick)
+            root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
             return
 
         if not auto_repeat_armed:
@@ -5295,7 +5612,7 @@ def auto_repeat_tick():
                 remain_cd = int(max(0, added_cooldown_until - now_ts))
                 status.set(f"예약 추가 후 대기 {remain_cd}초 (미완료 {pending}건)")
                 next_auto_run_at = added_cooldown_until
-                root.after(500, auto_repeat_tick)
+                root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
                 return
             added_cooldown_until = None
 
@@ -5322,7 +5639,7 @@ def auto_repeat_tick():
         print("자동 체크 오류:", e)
         next_auto_run_at = time.time() + 5
 
-    root.after(500, auto_repeat_tick)
+    root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
 
 def stop_all_automation(reason="⛔ 전체 자동 실행 취소"):
     global emergency_stop, auto_repeat_armed, refresh_repeat_enabled, refresh_stop_guard_enabled, pause_requested
@@ -5404,12 +5721,12 @@ def esc_poll_tick():
     except Exception as e:
         print("esc_poll_tick 오류:", e)
     finally:
-        root.after(30, esc_poll_tick)
+        root.after(ESC_POLL_TICK_MS, esc_poll_tick)
 
 # 반복 폴링 시작
-root.after(200, auto_f2_tick)
-root.after(500, auto_repeat_tick)
-root.after(30, esc_poll_tick)
+root.after(AUTO_F2_TICK_MS, auto_f2_tick)
+root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
+root.after(ESC_POLL_TICK_MS, esc_poll_tick)
 root.bind_all("<F5>", on_f5_refresh)
 
 # 초기 계산값 반영
