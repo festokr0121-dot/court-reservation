@@ -295,16 +295,30 @@ def start_run_summary(label):
         "next": 0,
         "fail": 0,
         "durations": [],
+        "by_date": {},
         "time_window_fail": 0,
         "printed": False,
     }
 
 
-def record_run_attempt(result, elapsed_sec, had_exception=False):
+def record_run_attempt(result, elapsed_sec, had_exception=False, reservation_date=None):
     if _run_summary is None:
         return
+    elapsed = max(0.0, float(elapsed_sec))
     _run_summary["attempts"] += 1
-    _run_summary["durations"].append(max(0.0, float(elapsed_sec)))
+    _run_summary["durations"].append(elapsed)
+
+    if reservation_date is not None:
+        date_key = str(reservation_date)
+        bucket = _run_summary["by_date"].setdefault(
+            date_key,
+            {"count": 0, "sum": 0.0, "max": 0.0},
+        )
+        bucket["count"] += 1
+        bucket["sum"] += elapsed
+        if elapsed > bucket["max"]:
+            bucket["max"] = elapsed
+
     if result in ("DONE", "NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
         _run_summary["success"] += 1
         if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
@@ -327,16 +341,36 @@ def print_run_summary_once(reason):
 
     durations = _run_summary["durations"]
     avg_sec = (sum(durations) / len(durations)) if durations else 0.0
+    min_sec = min(durations) if durations else 0.0
     max_sec = max(durations) if durations else 0.0
+    if durations:
+        sorted_durations = sorted(durations)
+        # Nearest-rank p95 for small sample counts.
+        rank = max(1, math.ceil(0.95 * len(sorted_durations)))
+        p95_sec = sorted_durations[rank - 1]
+    else:
+        p95_sec = 0.0
     total_elapsed = (datetime.datetime.now() - _run_summary["started_at"]).total_seconds()
     print(
         "[RUN-SUMMARY] "
         f"label={_run_summary['label']} reason={reason} "
         f"attempts={_run_summary['attempts']} success={_run_summary['success']} next={_run_summary['next']} fail={_run_summary['fail']} "
-        f"avg_sec={avg_sec:.3f} max_sec={max_sec:.3f} "
+        f"avg_sec={avg_sec:.3f} min_sec={min_sec:.3f} p95_sec={p95_sec:.3f} max_sec={max_sec:.3f} "
         f"time_window_fail={_run_summary['time_window_fail']} "
         f"elapsed_sec={total_elapsed:.3f}"
     )
+
+    by_date = _run_summary["by_date"]
+    if by_date:
+        parts = []
+        for date_key in sorted(by_date.keys()):
+            item = by_date[date_key]
+            avg_by_date = item["sum"] / item["count"] if item["count"] else 0.0
+            parts.append(
+                f"{date_key}:count={item['count']},avg={avg_by_date:.3f},max={item['max']:.3f}"
+            )
+        print("[RUN-SUMMARY-BY-DATE] " + " | ".join(parts))
+
     _run_summary["printed"] = True
 
 
@@ -3161,10 +3195,15 @@ def run_selected():
     try:
         result = run_reservation(res)
     except Exception:
-        record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+        record_run_attempt(
+            "EXCEPTION",
+            time.monotonic() - started_at,
+            had_exception=True,
+            reservation_date=res["date"],
+        )
         print_run_summary_once("run_selected_exception")
         raise
-    record_run_attempt(result, time.monotonic() - started_at)
+    record_run_attempt(result, time.monotonic() - started_at, reservation_date=res["date"])
 
     if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
         status.set(f"{res['id']}번 예약 불가")
@@ -3265,6 +3304,59 @@ def detect_auto_start_not_period_color():
     return color == AUTO_START_NOT_PERIOD_COLOR
 
 
+def parse_reservation_date_text(value):
+    """예약 날짜 텍스트를 (year, month, day)로 파싱한다. 실패 시 None 반환."""
+    if value is None:
+        return None
+
+    text = str(value).strip()
+    if not text:
+        return None
+
+    # 빠른 경로: ISO 형식(YYYY-MM-DD)
+    try:
+        iso_date = datetime.date.fromisoformat(text)
+        return iso_date.year, iso_date.month, iso_date.day
+    except ValueError:
+        pass
+
+    # 구분자 변형/한글 suffix 포함 케이스: 예) 2026/11/03, 2026.11.03, 2026-11-03 (월), 2026년 11월 3일
+    nums = re.findall(r"\d+", text)
+    if len(nums) < 3:
+        return None
+
+    candidates = []
+
+    # 8자리 연속 숫자 케이스: 20261103
+    first = nums[0]
+    if len(first) == 8:
+        try:
+            y = int(first[0:4])
+            m = int(first[4:6])
+            d = int(first[6:8])
+            candidates.append((y, m, d))
+        except ValueError:
+            pass
+
+    # 기본 케이스: 앞 3개 숫자를 Y, M, D로 간주
+    try:
+        y = int(nums[0])
+        m = int(nums[1])
+        d = int(nums[2])
+        candidates.append((y, m, d))
+    except ValueError:
+        pass
+
+    for y, m, d in candidates:
+        try:
+            checked = datetime.date(y, m, d)
+            return checked.year, checked.month, checked.day
+        except ValueError:
+            continue
+
+    return None
+
+
 def get_first_reservation_date_position():
     """예약리스트 1번 예약의 날짜 좌표를 반환한다. 없으면 None."""
     items = get_tree_items_sorted_by_id()
@@ -3275,11 +3367,10 @@ def get_first_reservation_date_position():
     if len(first_values) < 2:
         return None
 
-    date_text = str(first_values[1]).strip()
-    try:
-        y, m, d = map(int, date_text.split("-"))
-    except Exception:
+    parsed = parse_reservation_date_text(first_values[1])
+    if parsed is None:
         return None
+    y, m, d = parsed
 
     return get_date_position(y, m, d)
 
@@ -3292,11 +3383,11 @@ def get_first_reservation_target_month():
     values = tree.item(items[0]).get("values", [])
     if len(values) < 2:
         return None
-    try:
-        date_value = datetime.date.fromisoformat(str(values[1]).strip())
-    except (TypeError, ValueError):
+    parsed = parse_reservation_date_text(values[1])
+    if parsed is None:
         return None
-    return date_value.year, date_value.month
+    y, m, _ = parsed
+    return y, m
 
 
 def clear_manual_start_popup():
@@ -3382,11 +3473,11 @@ def run_manual_start_flow(items=None):
     if len(first_values) < 2:
         status.set("❌ 예약리스트 1번 날짜를 찾지 못해 수동 시작을 중단합니다")
         return False
-    try:
-        y, m, d = map(int, str(first_values[1]).split("-"))
-    except ValueError:
+    parsed = parse_reservation_date_text(first_values[1])
+    if parsed is None:
         status.set("❌ 예약 날짜 형식이 잘못되어 수동 시작을 중단합니다")
         return False
+    y, m, d = parsed
     date_pos = get_date_position(y, m, d)
     if date_pos is None:
         status.set("❌ 예약 날짜 좌표를 찾지 못해 수동 시작을 중단합니다")
@@ -3787,7 +3878,12 @@ def run_reservation_items(
                 try:
                     result = run_reservation(res, time_window_confirmed=True)
                 except Exception:
-                    record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+                    record_run_attempt(
+                        "EXCEPTION",
+                        time.monotonic() - started_at,
+                        had_exception=True,
+                        reservation_date=res["date"],
+                    )
                     print_run_summary_once("run_reservation_items_exception")
                     raise
             else:
@@ -3795,10 +3891,15 @@ def run_reservation_items(
                 try:
                     result = run_reservation(res)
                 except Exception:
-                    record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+                    record_run_attempt(
+                        "EXCEPTION",
+                        time.monotonic() - started_at,
+                        had_exception=True,
+                        reservation_date=res["date"],
+                    )
                     print_run_summary_once("run_reservation_items_exception")
                     raise
-            record_run_attempt(result, time.monotonic() - started_at)
+            record_run_attempt(result, time.monotonic() - started_at, reservation_date=res["date"])
             if result == "MANUAL_LIST_FINISHED":
                 print_run_summary_once("run_reservation_items_end")
                 return True
@@ -5273,10 +5374,15 @@ def run_auto_repeat_once():
         try:
             result = run_reservation(res)
         except Exception:
-            record_run_attempt("EXCEPTION", time.monotonic() - started_at, had_exception=True)
+            record_run_attempt(
+                "EXCEPTION",
+                time.monotonic() - started_at,
+                had_exception=True,
+                reservation_date=res["date"],
+            )
             print_run_summary_once("run_auto_repeat_once_exception")
             raise
-        record_run_attempt(result, time.monotonic() - started_at)
+        record_run_attempt(result, time.monotonic() - started_at, reservation_date=res["date"])
 
         if result in ("NEXT_RESERVATION", NEXT_RESERVATION_AFTER_ESC):
             status.set(f"{res['id']}번 예약 불가 → 다음으로 이동")
