@@ -50,6 +50,10 @@ MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC = 0.15
 AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC = 0.15
 AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC = 0.15
 AUTO_START_PAGE_UP_RETRY_DELAY_SEC = 0.15
+AUTO_START_TIME_WINDOW_QUICK_RECHECK_ENABLED = True
+AUTO_START_TIME_WINDOW_QUICK_RECHECK_TIMEOUT_SEC = 0.12
+AUTO_START_TIME_WINDOW_RECLICK_ENABLED = True
+AUTO_START_TIME_WINDOW_RECLICK_DELAY_SEC = 0.05
 AUTO_RECOVERY_ENABLED = True
 STARTUP_STRONG_PRECHECK_ENABLED = True
 RESERVATION_LIGHT_CHECK_ENABLED = True
@@ -83,6 +87,13 @@ TIME_WINDOW_CANCEL_MAX_ATTEMPTS = 2
 TIME_WINDOW_OPEN_RETRY_GAP_SEC = 0.01
 TIME_WINDOW_OPEN_TIMEOUT_STEPS_SEC = [0.50, 0.50]
 TIME_WINDOW_USE_BRIGHTNESS_FALLBACK = False
+IMMEDIATE_ADVANCE_AFTER_OPEN = True
+BACKUP_TIME_NEXT_CLICK_DELAY_SEC = 0.0
+COURT_AFTER_SELECT_DELAY_SEC = 0.0
+PEOPLE_SLEEP_AFTER_TAB_SEC = 0.0
+PEOPLE_SLEEP_AFTER_ENTER_BEFORE_INPUT_SEC = 0.0
+PEOPLE_SLEEP_AFTER_INPUT_SEC = 0.0
+PEOPLE_SLEEP_AFTER_FINAL_ENTER_SEC = 0.0
 NEXT_RESERVATION_AFTER_ESC = "NEXT_RESERVATION_AFTER_ESC"
 PEOPLE_STAGE_TEST_LOG_ENABLED = False
 WINDOW_OPEN_STABLE_HITS = 1
@@ -2627,21 +2638,29 @@ def detect_time_slot_position(target_time):
     """기본/백업 시간표에서 target_time 좌표를 감지해 반환한다."""
     selected_pos = None
     selected_source = None
+    fast_mode = IMMEDIATE_ADVANCE_AFTER_OPEN
+    sample_count = 1 if fast_mode else 2
+    required = 1
+    default_radius = 0 if fast_mode else 1
+    default_min_hits = 1 if fast_mode else 2
+    default_use_strong = False if fast_mode else True
+    backup_radius = 0 if fast_mode else 1
+    backup_min_hits = 1 if fast_mode else 2
 
     default_pos = time_positions.get(target_time)
     if default_pos:
         tx, ty = default_pos
         matched, hits, total, sample = temporal_color_confirm_details(
-            sample_count=2,
-            required=1,
+            sample_count=sample_count,
+            required=required,
             interval=0.0,
             x=tx,
             y=ty,
             targets=TIME_AVAILABLE_COLORS,
             tol=18,
-            radius=1,
-            min_hits=2,
-            use_strong=True,
+            radius=default_radius,
+            min_hits=default_min_hits,
+            use_strong=default_use_strong,
             hsv_targets=TIME_AVAILABLE_HSV_COLORS,
             h_tol=20.0,
             s_tol=0.35,
@@ -2651,7 +2670,10 @@ def detect_time_slot_position(target_time):
         log_color_detection(
             "time-slot-default", matched, coords=(tx, ty), rgb=(dr, dg, db),
             target=TIME_AVAILABLE_COLORS,
-            detail=f"time={target_time} hits={hits}/{total} sample={sample}/2",
+            detail=(
+                f"time={target_time} hits={hits}/{total} sample={sample}/{sample_count} "
+                f"mode={'fast' if fast_mode else 'safe'}"
+            ),
         )
         if matched:
             selected_pos = (tx, ty)
@@ -2667,15 +2689,15 @@ def detect_time_slot_position(target_time):
         if backup_pos:
             tx, ty = backup_pos
             matched, hits, total, sample = temporal_color_confirm_details(
-                sample_count=2,
-                required=1,
+                sample_count=sample_count,
+                required=required,
                 interval=0.0,
                 x=tx,
                 y=ty,
                 targets=TIME_AVAILABLE_COLORS,
                 tol=20,
-                radius=1,
-                min_hits=2,
+                radius=backup_radius,
+                min_hits=backup_min_hits,
                 use_strong=False,
                 hsv_targets=TIME_AVAILABLE_HSV_COLORS,
                 h_tol=22.0,
@@ -2686,7 +2708,10 @@ def detect_time_slot_position(target_time):
             log_color_detection(
                 "time-slot-backup", matched, coords=(tx, ty), rgb=(br, bg, bb),
                 target=TIME_AVAILABLE_COLORS,
-                detail=f"time={target_time} hits={hits}/{total} sample={sample}/2",
+                detail=(
+                    f"time={target_time} hits={hits}/{total} sample={sample}/{sample_count} "
+                    f"mode={'fast' if fast_mode else 'safe'}"
+                ),
             )
             if matched:
                 selected_pos = (tx, ty)
@@ -2701,9 +2726,12 @@ def detect_time_slot_position(target_time):
 
 def confirm_time_slot_before_click(x, y):
     """Require the actual click point to match an available color in both samples."""
+    fast_mode = IMMEDIATE_ADVANCE_AFTER_OPEN
+    sample_count = 1 if fast_mode else 2
+    required = 1 if fast_mode else 2
     matched, hits, total, sample = temporal_color_confirm_details(
-        sample_count=2,
-        required=2,
+        sample_count=sample_count,
+        required=required,
         interval=0.0,
         x=x,
         y=y,
@@ -2717,7 +2745,10 @@ def confirm_time_slot_before_click(x, y):
     log_color_detection(
         "time-slot-before-click", matched, coords=(x, y), rgb=(r, g, b),
         target=TIME_AVAILABLE_COLORS,
-        detail=f"hits={hits}/{total} sample={sample}/2",
+        detail=(
+            f"hits={hits}/{total} sample={sample}/{sample_count} "
+            f"mode={'fast' if fast_mode else 'safe'}"
+        ),
     )
     return matched
 
@@ -2802,9 +2833,12 @@ def run_reservation(res, time_window_confirmed=False):
                 return NEXT_RESERVATION_AFTER_ESC
 
             tx, ty = selected_pos
+            before_click = None if IMMEDIATE_ADVANCE_AFTER_OPEN else (
+                lambda: confirm_time_slot_before_click(tx, ty)
+            )
             if not click_and_confirm_selection(
                 tx, ty, timeout=1.2,
-                before_click=lambda: confirm_time_slot_before_click(tx, ty),
+                before_click=before_click,
                 label=f"time-slot-{res['time']}",
             ):
                 if emergency_stop:
@@ -2815,8 +2849,9 @@ def run_reservation(res, time_window_confirmed=False):
                     return "STOP"
                 return NEXT_RESERVATION_AFTER_ESC
             if selected_source == "backup":
-                if not safe_sleep(0.2):
-                    return "STOP"
+                if BACKUP_TIME_NEXT_CLICK_DELAY_SEC > 0:
+                    if not safe_sleep(BACKUP_TIME_NEXT_CLICK_DELAY_SEC):
+                        return "STOP"
                 time_click = lambda after_click: safe_click(
                     520, 760, after_click=after_click
                 )
@@ -2877,7 +2912,9 @@ def run_reservation(res, time_window_confirmed=False):
                 mark_stage("court", False)
                 cancel_time_selection_with_fallback()
                 return "NEXT_RESERVATION"
-            safe_sleep(court_delay_var.get())
+            if COURT_AFTER_SELECT_DELAY_SEC > 0:
+                if not safe_sleep(COURT_AFTER_SELECT_DELAY_SEC):
+                    return "STOP"
 
             if not click_and_wait_for_window_transition(
                 stage="court",
@@ -2984,14 +3021,16 @@ def run_reservation(res, time_window_confirmed=False):
                 print("❌ [TEST-PEOPLE][2] TAB 입력 실패")
                 return "STOP"
             people_test_log("[TEST-PEOPLE][2] TAB 입력 성공")
-            if not safe_sleep(0.05):
-                return "STOP"
+            if PEOPLE_SLEEP_AFTER_TAB_SEC > 0:
+                if not safe_sleep(PEOPLE_SLEEP_AFTER_TAB_SEC):
+                    return "STOP"
 
             if not safe_press("enter"):
                 print("❌ [TEST-PEOPLE][3] ENTER 입력 실패")
                 return "STOP"
-            if not safe_sleep(0.03):
-                return "STOP"
+            if PEOPLE_SLEEP_AFTER_ENTER_BEFORE_INPUT_SEC > 0:
+                if not safe_sleep(PEOPLE_SLEEP_AFTER_ENTER_BEFORE_INPUT_SEC):
+                    return "STOP"
             people_test_log("[TEST-PEOPLE][3] ENTER 입력 성공")
 
             people_text = str(res["people"]).strip()
@@ -3013,14 +3052,16 @@ def run_reservation(res, time_window_confirmed=False):
                         print(f"❌ [TEST-PEOPLE][5] 인원 숫자 입력 실패 key={ch}")
                         return "STOP"
                 people_test_log(f"[TEST-PEOPLE][5] 인원 숫자 입력 성공 people={people_text}")
-            if not safe_sleep(0.03):
-                return "STOP"
+            if PEOPLE_SLEEP_AFTER_INPUT_SEC > 0:
+                if not safe_sleep(PEOPLE_SLEEP_AFTER_INPUT_SEC):
+                    return "STOP"
 
             if not safe_press("enter"):
                 print("❌ [TEST-PEOPLE][6] ENTER 입력 실패")
                 return "STOP"
-            if not safe_sleep(0.05):
-                return "STOP"
+            if PEOPLE_SLEEP_AFTER_FINAL_ENTER_SEC > 0:
+                if not safe_sleep(PEOPLE_SLEEP_AFTER_FINAL_ENTER_SEC):
+                    return "STOP"
             people_test_log("[TEST-PEOPLE][6] ENTER 입력 성공")
 
             if not click_and_wait_for_window_transition(
@@ -3743,6 +3784,70 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
             if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
                 return
+
+            if AUTO_START_TIME_WINDOW_QUICK_RECHECK_ENABLED:
+                status.set(
+                    f"시간창 미감지 (시도 {attempt}) → 짧은 재검사 1회 후 재클릭 판단"
+                )
+                print(
+                    f"[AUTO-START] attempt={attempt} step=time-window "
+                    "result=RECHECK_BEFORE_RECLICK"
+                )
+                quick_window_ready, quick_samples = wait_for_time_window_open(
+                    timeout=AUTO_START_TIME_WINDOW_QUICK_RECHECK_TIMEOUT_SEC,
+                    use_ocr=False,
+                )
+                if quick_window_ready:
+                    print(
+                        f"[AUTO-START] attempt={attempt} "
+                        "step=time-window result=PASS_AFTER_QUICK_RECHECK "
+                        f"markers=[{format_time_window_samples(quick_samples)}]"
+                    )
+                    auto_start_date_clicked = True
+                    break
+                if emergency_stop:
+                    status.set("⚠ ESC로 취소됨")
+                    return
+                print(
+                    f"[AUTO-START] attempt={attempt} step=time-window "
+                    "result=QUICK_RECHECK_FAIL "
+                    f"markers=[{get_time_marker_debug()}]"
+                )
+
+            if AUTO_START_TIME_WINDOW_RECLICK_ENABLED:
+                status.set(
+                    f"시간창 미감지 (시도 {attempt}) → 같은 날짜 1회 재클릭 후 재확인"
+                )
+                print(
+                    f"[AUTO-START] attempt={attempt} step=time-window "
+                    "result=RETRY_SAME_DATE_CLICK"
+                )
+                logged_date_click(
+                    str(first_values[1]),
+                    dx,
+                    dy,
+                    first_values[0],
+                    attempt=attempt,
+                )
+                if not safe_sleep(AUTO_START_TIME_WINDOW_RECLICK_DELAY_SEC):
+                    status.set("⚠ ESC로 취소됨")
+                    return
+
+                retry_window_ready = wait_for_time_window_ready(
+                    max_attempts=1,
+                    log_context=f"auto-start outer_attempt={attempt} phase=reclick",
+                    use_ocr=True,
+                )
+                if retry_window_ready:
+                    print(
+                        f"[AUTO-START] attempt={attempt} "
+                        "step=time-window result=PASS_AFTER_RECLICK"
+                    )
+                    auto_start_date_clicked = True
+                    break
+                if emergency_stop:
+                    status.set("⚠ ESC로 취소됨")
+                    return
 
             status.set(
                 f"시간창 열림 미감지 (시도 {attempt}) → 팝업 정리 후 자동 시작 재시도"
