@@ -839,7 +839,7 @@ def click_step8_list_entry_with_text_first():
         const browserLeft = window.screenX;
         const browserTop = window.screenY + (window.outerHeight - window.innerHeight);
 
-        const norm = (s) => (s || '').replace(/\s+/g, '');
+        const norm = (s) => (s || '').replace(/\\s+/g, '');
         const candidates = [];
 
         const nodes = Array.from(document.querySelectorAll('a,button,[role="button"],td,span,div'));
