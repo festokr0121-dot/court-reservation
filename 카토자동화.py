@@ -672,6 +672,134 @@ def action_department_input():
     pyautogui.hotkey("ctrl", "v")
     time.sleep(float(delay_autocomplete.get()))
 
+def fill_contact_and_payer_dom():
+        """대표 연락처/입금자명을 DOM에 직접 입력한다. 성공 시 True."""
+        if driver is None:
+                return False
+
+        payer_name = payer_var.get().strip()
+        script = """
+        const phoneMid = arguments[0];
+        const phoneLast = arguments[1];
+        const payer = arguments[2];
+
+        function findRowByLabel(labelText) {
+            const rows = Array.from(document.querySelectorAll('tr'));
+            for (const row of rows) {
+                const head = row.querySelector('th, td');
+                const text = (head?.innerText || '').replace(/\s+/g, '');
+                if (text.includes(labelText.replace(/\s+/g, ''))) {
+                    return row;
+                }
+            }
+            return null;
+        }
+
+        function setValue(el, value) {
+            if (!el) return false;
+            el.focus();
+
+            if (el.tagName === 'SELECT') {
+                const opts = Array.from(el.options || []);
+                const matched = opts.find(o => o.value === value || (o.textContent || '').trim() === value);
+                if (matched) {
+                    el.value = matched.value;
+                } else {
+                    el.value = value;
+                }
+            } else {
+                el.value = '';
+                el.dispatchEvent(new Event('input', { bubbles: true }));
+                el.value = value;
+            }
+
+            el.dispatchEvent(new Event('input', { bubbles: true }));
+            el.dispatchEvent(new Event('change', { bubbles: true }));
+            el.dispatchEvent(new Event('blur', { bubbles: true }));
+            return true;
+        }
+
+        const result = {
+            phone: false,
+            payer: false,
+            phoneRowFound: false,
+            payerRowFound: false
+        };
+
+        const phoneRow = findRowByLabel('대표연락처');
+        if (phoneRow) {
+            result.phoneRowFound = true;
+            const select = phoneRow.querySelector('select');
+            const inputs = Array.from(phoneRow.querySelectorAll('input[type="text"], input[type="tel"], input[type="number"], input:not([type])'));
+
+            let ok = true;
+            if (select) {
+                ok = setValue(select, '010') && ok;
+            }
+
+            if (inputs.length >= 2) {
+                ok = setValue(inputs[0], phoneMid) && ok;
+                ok = setValue(inputs[1], phoneLast) && ok;
+            } else {
+                ok = false;
+            }
+
+            result.phone = ok;
+        }
+
+        const payerRow = findRowByLabel('입금자명');
+        if (payerRow) {
+            result.payerRowFound = true;
+            const payerInput = payerRow.querySelector('input[type="text"], input:not([type]), textarea');
+            result.payer = setValue(payerInput, payer);
+        }
+
+        return result;
+        """
+
+        try:
+                res = driver.execute_script(script, "6229", "2975", payer_name) or {}
+                phone_ok = bool(res.get("phone"))
+                payer_ok = bool(res.get("payer"))
+                if phone_ok and payer_ok:
+                        add_log("연락처/입금자 DOM 입력 성공")
+                        return True
+
+                add_log(
+                        "연락처/입금자 DOM 입력 부분실패: "
+                        f"phone_ok={phone_ok}, payer_ok={payer_ok}, "
+                        f"phone_row={res.get('phoneRowFound')}, payer_row={res.get('payerRowFound')}"
+                )
+                return False
+        except Exception as e:
+                add_log(f"연락처/입금자 DOM 입력 예외: {e}")
+                return False
+
+def fill_contact_and_payer_with_fallback():
+        """DOM 직접입력을 우선 시도하고, 실패 시 기존 탭 기반 키보드 입력으로 폴백한다."""
+        if fill_contact_and_payer_dom():
+                time.sleep(float(delay_autocomplete.get()))
+                return
+
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.write("0")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.press("tab")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.write("6229")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.press("tab")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.write("2975")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.press("tab")
+        time.sleep(float(delay_autocomplete.get()))
+        action_min_yonggi_payment()
+        pyautogui.press("tab")
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.press("tab")
+        time.sleep(float(delay_autocomplete.get()))
+
 def should_skip_one_input():
     dept = department_var.get().strip()
     return dept in ("개나리부", "챌린저부")
@@ -1237,15 +1365,7 @@ def run_after_step8():
         steps.append(("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))))
 
     steps += [
-        ("0 입력", lambda: (pyautogui.write("0"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("6229 입력", lambda: (pyautogui.write("6229"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("2975 입력", lambda: (pyautogui.write("2975"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("입금자명 자동완성", lambda: (action_min_yonggi_payment(), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
+        ("연락처/입금자 입력", fill_contact_and_payer_with_fallback),
     ]
 
 
@@ -1467,15 +1587,7 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
         steps.append(("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))))
 
     steps += [
-        ("0 입력", lambda: (pyautogui.write("0"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("6229 입력", lambda: (pyautogui.write("6229"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("2975 입력", lambda: (pyautogui.write("2975"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("입금자명 자동완성", lambda: (action_min_yonggi_payment(), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
-        ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
+        ("연락처/입금자 입력", fill_contact_and_payer_with_fallback),
     ]
 
     total_steps = len(steps)
@@ -1694,7 +1806,7 @@ def show_flow_coordinate_table():
         ("C", "C04", "인원/부서 입력1", "270,795", f"{delay_autocomplete.get()}초", "챌린저/개나리: tab | 그 외: tab, 1"),
         ("C", "C05", "참가자2 입력 시작", "270,880", f"{delay_autocomplete.get()}초", "클릭 + 자동완성"),
         ("C", "C06", "인원/부서 입력2", "270,920", f"{delay_autocomplete.get()}초", "챌린저/개나리: tab | 그 외: tab, 1"),
-        ("C", "C07", "결제/계좌/입금자 입력", "키보드 입력", f"{delay_autocomplete.get()}초", "0, 6229, 2975, 입금자명"),
+        ("C", "C07", "연락처/입금자 입력", "DOM 우선", f"{delay_autocomplete.get()}초", "실패 시 키보드 폴백(0, 6229, 2975, 입금자명)"),
         ("C", "C99", "최종 Enter", "Enter", "즉시", "RECEIVE 모드일 때만"),
     ]
 
