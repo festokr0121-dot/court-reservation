@@ -60,6 +60,13 @@ FOCUS_X, FOCUS_Y = 766, 733
 NAV_X, NAV_Y = 100, 60
 STEP8_LIST_X, STEP8_LIST_Y = 186, 676
 
+WARMUP_ENABLED = True
+WARMUP_OFFSETS_SEC = [300, 240, 180, 120, 10]
+# 실전 기본값은 전체화면 캡처다. 테스트가 필요할 때만 아래 플래그를 True로 켠다.
+WARMUP_USE_TEST_REGION = False
+# 사용자 제공 테스트 좌표: 좌상단(8,233) ~ 우하단(478,375)
+WARMUP_TEST_REGION = (8, 233, 470, 142)  # (x, y, width, height)
+
 TEXT_DETECT_COORDS_DIRECT = [
     (80, 772),
     (80, 848),
@@ -88,6 +95,56 @@ def add_log(msg):
 def add_step_log(step_id, title, result, detail=""):
     suffix = f" | {detail}" if detail else ""
     add_log(f"[STEP {step_id}] {title} -> {result}{suffix}")
+
+def run_warmup_probe(label, target_dt, scheduled_dt):
+    """예약 직전 지연을 줄이기 위한 가벼운 워밍업(읽기 전용)"""
+    started = time.perf_counter()
+    now = datetime.datetime.now().strftime("%H:%M:%S.%f")
+
+    capture_ms = None
+    pixel_ms = None
+    row_text_preview = ""
+
+    try:
+        region = WARMUP_TEST_REGION if WARMUP_USE_TEST_REGION else None
+        capture_t0 = time.perf_counter()
+        img = pyautogui.screenshot(region=region)
+        capture_ms = (time.perf_counter() - capture_t0) * 1000.0
+
+        # 작은 샘플 3점만 읽어 화면 상태를 빠르게 워밍업한다.
+        px_t0 = time.perf_counter()
+        w, h = img.size
+        edge_margin = 20
+        if w <= edge_margin * 2 or h <= edge_margin * 2:
+            edge_margin = 1
+        sample_points = [
+            (edge_margin, edge_margin),
+            (w // 2, h // 2),
+            (max(edge_margin, w - edge_margin), max(edge_margin, h - edge_margin)),
+        ]
+        sampled = []
+        for sx, sy in sample_points:
+            px = min(max(0, sx), w - 1)
+            py = min(max(0, sy), h - 1)
+            sampled.append(((px, py), img.getpixel((px, py))))
+        pixel_ms = (time.perf_counter() - px_t0) * 1000.0
+
+        # Selenium 연결이 있으면 현재 선택된 부서 감지 좌표 텍스트를 짧게 조회한다.
+        detect_coord = get_department_detect_coord(dept_detect_selected.get(), False)
+        if detect_coord and detect_coord[0] > 0 and detect_coord[1] > 0:
+            row_text_preview = get_row_text_from_viewport_point(detect_coord[0], detect_coord[1])[:80]
+
+        add_log(
+            f"[WARMUP] {now} label={label} capture_ms={capture_ms:.1f} "
+            f"pixel_ms={pixel_ms:.1f} target={target_dt.strftime('%H:%M:%S')} "
+            f"mode={'test-region' if WARMUP_USE_TEST_REGION else 'full-screen'} "
+            f"samples={sampled} row='{row_text_preview}'"
+        )
+    except Exception as e:
+        add_log(f"[WARMUP] {now} label={label} result=FAIL reason={e}")
+    finally:
+        total_ms = (time.perf_counter() - started) * 1000.0
+        add_log(f"[WARMUP-END] label={label} total_ms={total_ms:.1f}")
 
 # ============================================================
 # 백업 기능 (누락된 함수 복구)
@@ -929,6 +986,8 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
 
     if immediate_start:
         add_step_log("A01", "테스트 즉시 시작", "OK", "정각 대기 생략")
+        if WARMUP_ENABLED:
+            add_log("[WARMUP-SKIP] reason=immediate_start")
     else:
         try:
             hour = int(hour_var.get())
@@ -946,10 +1005,37 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
             target += datetime.timedelta(days=1)
         add_step_log("A02", "대기 시작", "START", f"target={target.strftime('%Y-%m-%d %H:%M:%S')}")
 
+        warmup_plan = []
+        warmup_done = set()
+        if WARMUP_ENABLED:
+            now = datetime.datetime.now()
+            for offset_sec in WARMUP_OFFSETS_SEC:
+                scheduled = target - datetime.timedelta(seconds=offset_sec)
+                label = f"T-{offset_sec}s"
+                if now > scheduled:
+                    add_log(f"[WARMUP-SKIP] step={label} reason=missed")
+                    warmup_done.add(offset_sec)
+                else:
+                    warmup_plan.append((offset_sec, label, scheduled))
+
         while datetime.datetime.now() < target:
             if STOP_FLAG:
                 add_step_log("A02", "대기 시작", "STOP")
                 return
+
+            if WARMUP_ENABLED and warmup_plan:
+                now = datetime.datetime.now()
+                for offset_sec, label, scheduled in warmup_plan:
+                    if offset_sec in warmup_done:
+                        continue
+                    if now >= scheduled:
+                        warmup_done.add(offset_sec)
+                        REFRESH_PAUSED = True
+                        try:
+                            run_warmup_probe(label, target, scheduled)
+                        finally:
+                            REFRESH_PAUSED = False
+
             time.sleep(0.01)
 
         add_step_log("A02", "대기 완료", "OK")
