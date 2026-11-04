@@ -59,6 +59,20 @@ REFRESH_PAUSED = False
 FOCUS_X, FOCUS_Y = 766, 733
 NAV_X, NAV_Y = 100, 60
 STEP8_LIST_X, STEP8_LIST_Y = 186, 676
+STEP8_PRIMARY_BOX = (130, 660, 230, 690)  # 1번 감지 박스
+FORCE_PRIMARY_FLOW_ONLY = False  # True면 2번 분기 없이 1번 흐름만 실행
+FORCE_SECONDARY_FLOW_ONLY = False  # True면 1번 흐름 건드리지 않고 2번 흐름만 실행
+LONG_TITLE_RETRY_SHIFT_PX = 39
+LONG_TITLE_RETRY_X, LONG_TITLE_RETRY_Y = 186, 715
+LONG_TITLE_RETRY_BOX = (130, 710, 230, 730)  # 2번 감지 박스: left, top, right, bottom
+CURRENT_X_OFFSET_PX = 0
+CURRENT_Y_OFFSET_PX = 0
+LOCK_Y_OFFSET_TO_39 = False
+
+# 운영 중 과도한 로그를 줄이기 위한 디버그 플래그
+VERBOSE_STEP8_LOG = False
+AUTO_BACKUP_ON_SUCCESS = True
+FORCE_STEP8_CLICK_ON_COLOR_TIMEOUT = True
 
 WARMUP_ENABLED = True
 WARMUP_OFFSETS_SEC = [300, 240, 180, 120, 10]
@@ -95,6 +109,20 @@ def add_log(msg):
 def add_step_log(step_id, title, result, detail=""):
     suffix = f" | {detail}" if detail else ""
     add_log(f"[STEP {step_id}] {title} -> {result}{suffix}")
+
+def add_debug_log(msg):
+    if VERBOSE_STEP8_LOG:
+        add_log(msg)
+
+def get_long_title_retry_shift_px():
+    # 사용자 실측 기준: 676 -> 715 (정확히 +39px)
+    return int(LONG_TITLE_RETRY_SHIFT_PX)
+
+def apply_x_offset(x):
+    return int(round(x + CURRENT_X_OFFSET_PX))
+
+def apply_y_offset(y):
+    return int(round(y + CURRENT_Y_OFFSET_PX))
 
 def run_warmup_probe(label, target_dt, scheduled_dt):
     """예약 직전 지연을 줄이기 위한 가벼운 워밍업(읽기 전용)"""
@@ -150,7 +178,7 @@ def run_warmup_probe(label, target_dt, scheduled_dt):
 # 백업 기능 (누락된 함수 복구)
 # ============================================================
 
-def create_backup():
+def create_backup(show_popup=True):
     try:
         current_file = os.path.abspath(__file__)
         folder = os.path.dirname(current_file)
@@ -178,10 +206,18 @@ def create_backup():
 
         shutil.copy2(current_file, backup_path)
 
-        msg.showinfo("백업 완료", f"백업 폴더: backup/\n코드 백업 파일: {backup_name}")
+        if show_popup:
+            msg.showinfo("백업 완료", f"백업 폴더: backup/\n코드 백업 파일: {backup_name}")
+        else:
+            add_log(f"자동 백업 완료: backup/{backup_name}")
+        return True
 
     except Exception as e:
-        msg.showerror("백업 실패", f"오류 발생: {e}")
+        if show_popup:
+            msg.showerror("백업 실패", f"오류 발생: {e}")
+        else:
+            add_log(f"자동 백업 실패: {e}")
+        return False
 
 # ============================================================
 # UI 시작 (딜레이 변수는 반드시 root 아래에서 생성)
@@ -603,22 +639,28 @@ def auto_select_with_hover(start_x, start_y):
     pyautogui.press("tab")
 
 def action_min_yonggi_final():
-    pyautogui.click(270, 725)
+    x_click = apply_x_offset(270)
+    y1 = apply_y_offset(725)
+    y2 = apply_y_offset(795)
+    pyautogui.click(x_click, y1)
     time.sleep(float(delay_autocomplete.get()))
-    pyautogui.moveTo(270, 795, duration=float(delay_autocomplete.get()))
+    pyautogui.moveTo(x_click, y2, duration=float(delay_autocomplete.get()))
     pyperclip.copy(name1_var.get())
     pyautogui.hotkey("ctrl", "v")
     time.sleep(float(delay_autocomplete.get()))
-    auto_select_with_hover(270, 795)
+    auto_select_with_hover(x_click, y2)
 
 def action_shin_myeongsik():
-    pyautogui.click(270, 880)
+    x_click = apply_x_offset(270)
+    y1 = apply_y_offset(880)
+    y2 = apply_y_offset(920)
+    pyautogui.click(x_click, y1)
     time.sleep(float(delay_autocomplete.get()))
-    pyautogui.moveTo(270, 920, duration=float(delay_autocomplete.get()))
+    pyautogui.moveTo(x_click, y2, duration=float(delay_autocomplete.get()))
     pyperclip.copy(name2_var.get())
     pyautogui.hotkey("ctrl", "v")
     time.sleep(float(delay_autocomplete.get()))
-    auto_select_with_hover(270, 920)
+    auto_select_with_hover(x_click, y2)
 
 def action_min_yonggi_payment():
     pyperclip.copy(payer_var.get())
@@ -714,6 +756,223 @@ def get_candidate_rows():
     except Exception:
         return []
 
+def click_step8_participation_by_detect_row(did_pagedown=False):
+    """부서 감지 좌표가 가리키는 같은 행에서 참가신청 버튼/텍스트를 직접 클릭한다."""
+    if driver is None:
+        return False
+
+    detect_coord = get_department_detect_coord(dept_detect_selected.get(), did_pagedown)
+    if not detect_coord:
+        return False
+
+    x = apply_x_offset(detect_coord[0])
+    y = apply_y_offset(detect_coord[1])
+
+    script = """
+    const screenX = arguments[0];
+    const screenY = arguments[1];
+    const browserLeft = window.screenX;
+    const browserTop = window.screenY + (window.outerHeight - window.innerHeight);
+    const viewportX = Math.round(screenX - browserLeft);
+    const viewportY = Math.round(screenY - browserTop);
+
+    const base = document.elementFromPoint(viewportX, viewportY);
+    if (!base) return { ok: false, reason: 'no-element' };
+
+    const row = base.closest('tr');
+    if (!row) return { ok: false, reason: 'no-row' };
+
+    const targets = Array.from(row.querySelectorAll('a,button,[role="button"],td,span,div'));
+    const keywords = ['참가자신청', '참가자 신청', '참가신청'].map(s => s.replace(/\\s+/g, ''));
+
+    for (const el of targets) {
+        const raw = (el.innerText || el.textContent || '').trim();
+        const normalized = raw.replace(/\\s+/g, '');
+        if (!normalized) continue;
+        if (!keywords.some(k => normalized.includes(k))) continue;
+
+        const r = el.getBoundingClientRect();
+        if (r.width < 4 || r.height < 4) continue;
+
+        el.click();
+        return { ok: true, text: raw.slice(0, 80) };
+    }
+
+    return { ok: false, reason: 'no-participation-cell' };
+    """
+
+    try:
+        result = driver.execute_script(script, x, y)
+        if result and result.get("ok"):
+            add_log(
+                f"Step8 행기반 클릭 성공: detect_coord=({x},{y}), text={result.get('text', '')}"
+            )
+            return True
+        add_log(
+            f"Step8 행기반 클릭 실패: detect_coord=({x},{y}), reason={result.get('reason', 'unknown') if result else 'script-null'}"
+        )
+    except Exception as e:
+        add_log(f"Step8 행기반 클릭 예외: {e}")
+
+    return False
+
+def click_step8_list_entry_with_text_first():
+    """표 기준 Step8 목록 진입: 기본은 1->2 분기, 강제 모드면 1번만 실행."""
+    global CURRENT_X_OFFSET_PX, CURRENT_Y_OFFSET_PX, LOCK_Y_OFFSET_TO_39
+    CURRENT_X_OFFSET_PX = 0
+    CURRENT_Y_OFFSET_PX = 0
+    LOCK_Y_OFFSET_TO_39 = False
+
+    def _box_detect(box, label):
+        """박스 내부에 표시된 '참가신청' 계열 텍스트 요소 중심점이 있으면 감지 성공."""
+        if driver is None:
+            add_log(f"Step8 박스 감지 실패[{label}]: Selenium driver 없음")
+            return False
+
+        l, t, r, b = box
+        script = """
+        const left = arguments[0];
+        const top = arguments[1];
+        const right = arguments[2];
+        const bottom = arguments[3];
+
+        const browserLeft = window.screenX;
+        const browserTop = window.screenY + (window.outerHeight - window.innerHeight);
+
+        const norm = (s) => (s || '').replace(/\s+/g, '');
+        const candidates = [];
+
+        const nodes = Array.from(document.querySelectorAll('a,button,[role="button"],td,span,div'));
+        for (const el of nodes) {
+            const raw = (el.innerText || el.textContent || '').trim();
+            const text = norm(raw);
+            if (!text) continue;
+            if (!(text.includes('참가자신청') || text.includes('참가신청'))) continue;
+
+            const rect = el.getBoundingClientRect();
+            if (rect.width < 4 || rect.height < 4) continue;
+
+            const cx = browserLeft + rect.left + rect.width / 2;
+            const cy = browserTop + rect.top + rect.height / 2;
+            if (cx < left || cx > right || cy < top || cy > bottom) continue;
+
+            candidates.push({
+                x: Math.round(cx),
+                y: Math.round(cy),
+                text: raw.slice(0, 80)
+            });
+        }
+
+        if (candidates.length === 0) {
+            return { ok: false, count: 0 };
+        }
+
+        candidates.sort((a, b) => a.y - b.y || a.x - b.x);
+        return {
+            ok: true,
+            count: candidates.length,
+            first: candidates[0],
+        };
+        """
+
+        try:
+            result = driver.execute_script(script, l, t, r, b)
+            if result and result.get("ok"):
+                first = result.get("first") or {}
+                add_log(
+                    f"Step8 박스 감지 성공[{label}]: box={box}, count={result.get('count', 0)}, "
+                    f"first=({first.get('x')},{first.get('y')}), text={first.get('text', '')}"
+                )
+                return True
+            add_log(f"Step8 박스 감지 실패[{label}]: box={box}, count=0")
+            return False
+        except Exception as e:
+            add_log(f"Step8 박스 감지 예외[{label}]: {e}")
+            return False
+
+    # 강제 모드: 2번 흐름 전용 실행 (1번 로직은 그대로 유지하고 우회)
+    if FORCE_SECONDARY_FLOW_ONLY:
+        shifted_px = get_long_title_retry_shift_px()
+
+        if _box_detect(LONG_TITLE_RETRY_BOX, "secondary"):
+            CURRENT_X_OFFSET_PX = 0
+            CURRENT_Y_OFFSET_PX = shifted_px
+            LOCK_Y_OFFSET_TO_39 = True
+            pyautogui.click(LONG_TITLE_RETRY_X, LONG_TITLE_RETRY_Y)
+            add_log(
+                f"Step8 2번 전용 감지 성공 -> 클릭 coord=({LONG_TITLE_RETRY_X},{LONG_TITLE_RETRY_Y}), "
+                f"box={LONG_TITLE_RETRY_BOX}, shift_px={shifted_px}, lock_y39={LOCK_Y_OFFSET_TO_39}"
+            )
+            return "text-shifted-y"
+
+        CURRENT_X_OFFSET_PX = 0
+        CURRENT_Y_OFFSET_PX = shifted_px
+        LOCK_Y_OFFSET_TO_39 = True
+        pyautogui.click(LONG_TITLE_RETRY_X, LONG_TITLE_RETRY_Y)
+        add_log(
+            f"Step8 2번 전용 강제 실행: secondary_box 미감지여도 coord=({LONG_TITLE_RETRY_X},{LONG_TITLE_RETRY_Y}) 클릭, "
+            f"shift_px={shifted_px}, lock_y39={LOCK_Y_OFFSET_TO_39}"
+        )
+        return "text-shifted-y-forced"
+
+    # 강제 모드: 1번 감지 성공이면 정상 클릭, 실패해도 1번 좌표 강제 실행
+    if FORCE_PRIMARY_FLOW_ONLY:
+        if _box_detect(STEP8_PRIMARY_BOX, "primary"):
+            CURRENT_X_OFFSET_PX = 0
+            CURRENT_Y_OFFSET_PX = 0
+            LOCK_Y_OFFSET_TO_39 = False
+            pyautogui.click(STEP8_LIST_X, STEP8_LIST_Y)
+            add_log(
+                f"Step8 1번 감지 성공 -> 클릭 coord=({STEP8_LIST_X},{STEP8_LIST_Y}), "
+                f"box={STEP8_PRIMARY_BOX}"
+            )
+            return "text-primary-box"
+
+        CURRENT_X_OFFSET_PX = 0
+        CURRENT_Y_OFFSET_PX = 0
+        LOCK_Y_OFFSET_TO_39 = False
+        pyautogui.click(STEP8_LIST_X, STEP8_LIST_Y)
+        add_log(
+            f"Step8 1번 강제 실행: primary_box 미감지여도 coord=({STEP8_LIST_X},{STEP8_LIST_Y}) 클릭"
+        )
+        return "text-primary-forced"
+
+    # 1번 흐름: 박스 감지 성공 시 (186,676) 클릭
+    if _box_detect(STEP8_PRIMARY_BOX, "primary"):
+        CURRENT_X_OFFSET_PX = 0
+        CURRENT_Y_OFFSET_PX = 0
+        LOCK_Y_OFFSET_TO_39 = False
+        pyautogui.click(STEP8_LIST_X, STEP8_LIST_Y)
+        add_log(
+            f"Step8 1번 감지 성공 -> 클릭 coord=({STEP8_LIST_X},{STEP8_LIST_Y}), "
+            f"box={STEP8_PRIMARY_BOX}"
+        )
+        return "text-primary-box"
+
+    add_log("Step8 1번 감지 실패 -> 2번 감지 진행")
+
+    # 2번 흐름: 박스 감지 성공 시 (186,715) 클릭 및 y+39 잠금
+    if _box_detect(LONG_TITLE_RETRY_BOX, "secondary"):
+        shifted_px = get_long_title_retry_shift_px()
+        CURRENT_X_OFFSET_PX = 0
+        CURRENT_Y_OFFSET_PX = shifted_px
+        LOCK_Y_OFFSET_TO_39 = True
+        pyautogui.click(LONG_TITLE_RETRY_X, LONG_TITLE_RETRY_Y)
+        add_log(
+            f"Step8 2번 감지 성공 -> 클릭 coord=({LONG_TITLE_RETRY_X},{LONG_TITLE_RETRY_Y}), "
+            f"box={LONG_TITLE_RETRY_BOX}, shift_px={shifted_px}, lock_y39={LOCK_Y_OFFSET_TO_39}"
+        )
+        return "text-shifted-y"
+
+    # 표 기준: 1/2 모두 실패 시 클릭하지 않고 루프 재시도
+    add_log(
+        f"Step8 감지 실패: primary_box={STEP8_PRIMARY_BOX}, secondary_box={LONG_TITLE_RETRY_BOX} -> 미클릭 재시도"
+    )
+    CURRENT_X_OFFSET_PX = 0
+    CURRENT_Y_OFFSET_PX = 0
+    LOCK_Y_OFFSET_TO_39 = False
+    return "no-detect"
+
 def detect_department_on_page(step8_idx=None, did_pagedown=False):
     """변경흐름 기준: 선택된 부서감지 좌표의 텍스트에 목표 부서명이 포함되는지 확인한다."""
 
@@ -738,6 +997,8 @@ def detect_department_on_page(step8_idx=None, did_pagedown=False):
             return False
 
         x, y = detect_coord
+        x = apply_x_offset(x)
+        y = apply_y_offset(y)
         if x <= 0 or y <= 0:
             add_log(f"부서감지 좌표 비정상: 선택번호={detect_idx+1}, coord=({x},{y})")
             return False
@@ -811,21 +1072,78 @@ def wait_for_step8_color_ready(x, y, timeout_sec=2.5, poll_sec=0.05):
     return False
 
 def click_step8_selected(idx, step8_coords, did_pagedown=False):
+    global CURRENT_X_OFFSET_PX, CURRENT_Y_OFFSET_PX, LOCK_Y_OFFSET_TO_39
     # 변경흐름 기준: Step8 좌표 색상 감지 후 일치할 때만 좌표 클릭한다.
     coord = step8_coords[idx]
     if coord is None:
         add_log(f"Step8 좌표 없음: idx={idx}")
         return False
 
-    x, y = coord
-    add_log(f"Step8 색상감지 시작: idx={idx}, coord=({x},{y})")
-
+    raw_x, raw_y = coord
     wait_timeout = max(1.5, float(delay_step8.get()) * 8)
-    if not wait_for_step8_color_ready(x, y, timeout_sec=wait_timeout, poll_sec=0.05):
-        add_log(f"Step8 색상 대기 타임아웃({wait_timeout:.2f}s): 클릭하지 않고 재시도")
-        return False
 
-    add_log(f"Step8 클릭 시도: idx={idx}, coord=({x},{y})")
+    # +39 보정이 필요한 케이스를 포함해 y 후보를 순차 탐색한다.
+    shift39 = get_long_title_retry_shift_px()
+    if LOCK_Y_OFFSET_TO_39:
+        y_offset_candidates = [shift39]
+    else:
+        y_offset_candidates = []
+        for off in [CURRENT_Y_OFFSET_PX, 0, shift39]:
+            if off not in y_offset_candidates:
+                y_offset_candidates.append(off)
+
+    chosen = None
+    attempted_coords = []
+    for y_off in y_offset_candidates:
+        x = int(round(raw_x + CURRENT_X_OFFSET_PX))
+        y = int(round(raw_y + y_off))
+        attempted_coords.append((x, y, y_off))
+        add_log(
+            f"Step8 색상감지 시작: idx={idx}, coord=({x},{y}), "
+            f"x_offset={CURRENT_X_OFFSET_PX}, y_offset={y_off}"
+        )
+
+        if wait_for_step8_color_ready(x, y, timeout_sec=wait_timeout, poll_sec=0.05):
+            chosen = (x, y, y_off)
+            break
+
+    if chosen is None:
+        add_log(
+            f"Step8 색상 대기 타임아웃({wait_timeout:.2f}s): tried={attempted_coords}"
+        )
+
+        # 색상 기준이 흔들릴 때는 이미 감지된 동일 행의 참가신청 셀 직접 클릭을 우선 시도한다.
+        if click_step8_participation_by_detect_row(did_pagedown):
+            add_log("Step8 색상 타임아웃 대체 성공: 행기반 참가신청 클릭")
+            return True
+
+        if not FORCE_STEP8_CLICK_ON_COLOR_TIMEOUT:
+            add_log("Step8 색상 미일치: 클릭하지 않고 재시도")
+            return False
+
+        # 실전에서 색상 오차가 발생해도 클릭 자체는 진행되도록 최종 폴백을 둔다.
+        x = int(round(raw_x + CURRENT_X_OFFSET_PX))
+        if LOCK_Y_OFFSET_TO_39:
+            y = int(round(raw_y + shift39))
+            CURRENT_Y_OFFSET_PX = shift39
+        else:
+            y = int(round(raw_y + CURRENT_Y_OFFSET_PX))
+        add_log(
+            f"Step8 강제 클릭 폴백 실행: idx={idx}, coord=({x},{y}), "
+            f"x_offset={CURRENT_X_OFFSET_PX}, y_offset={CURRENT_Y_OFFSET_PX}, lock_y39={LOCK_Y_OFFSET_TO_39}"
+        )
+    else:
+        x, y, selected_y_off = chosen
+        if LOCK_Y_OFFSET_TO_39:
+            if CURRENT_Y_OFFSET_PX != shift39:
+                add_log(f"Step8 y_offset 잠금 유지: {CURRENT_Y_OFFSET_PX} -> {shift39}")
+                CURRENT_Y_OFFSET_PX = shift39
+        elif selected_y_off != CURRENT_Y_OFFSET_PX:
+            add_log(
+                f"Step8 y_offset 자동보정: {CURRENT_Y_OFFSET_PX} -> {selected_y_off}"
+            )
+            CURRENT_Y_OFFSET_PX = selected_y_off
+        add_log(f"Step8 클릭 시도: idx={idx}, coord=({x},{y})")
 
     pyautogui.moveTo(x, y, duration=float(delay_step8.get()))
     time.sleep(float(delay_step8.get()))
@@ -875,6 +1193,10 @@ def get_step8_coords():
 # ============================================================
 
 def run_after_step8():
+    global CURRENT_X_OFFSET_PX, CURRENT_Y_OFFSET_PX
+    CURRENT_X_OFFSET_PX = 0
+    CURRENT_Y_OFFSET_PX = 0
+
     skip_one = should_skip_one_input()
 
     steps = [
@@ -947,6 +1269,9 @@ def run_after_step8():
         pyautogui.press("enter")
         add_step_log("C99", "최종 ENTER", "OK")
 
+    if AUTO_BACKUP_ON_SUCCESS:
+        create_backup(show_popup=False)
+
     msg.showinfo("완료", "모든 자동화 순서가 완료되었습니다!")
 
 # ============================================================
@@ -981,7 +1306,9 @@ def run_manual_participants():
 # ============================================================
 
 def run_automation(step8_idx, step8_coords, immediate_start=False):
-    global REFRESH_PAUSED
+    global REFRESH_PAUSED, CURRENT_X_OFFSET_PX, CURRENT_Y_OFFSET_PX
+    CURRENT_X_OFFSET_PX = 0
+    CURRENT_Y_OFFSET_PX = 0
     skip_one = should_skip_one_input()
 
     if immediate_start:
@@ -1073,9 +1400,14 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
         try:
             # 5) 좌표 클릭
             add_step_log("B03", "Step8 목록 이동", "START", f"coord=({STEP8_LIST_X},{STEP8_LIST_Y})")
-            pyautogui.click(STEP8_LIST_X, STEP8_LIST_Y)
+            b03_mode = click_step8_list_entry_with_text_first()
             time.sleep(1.0)
-            add_step_log("B03", "Step8 목록 이동", "OK")
+            add_step_log("B03", "Step8 목록 이동", "OK", f"mode={b03_mode}, y_offset={CURRENT_Y_OFFSET_PX}")
+
+            if b03_mode == "no-detect":
+                add_step_log("B03", "Step8 목록 이동", "FAIL", "1/2 박스 미감지 - 루프 재시도")
+                time.sleep(float(delay_autocomplete.get()))
+                continue
 
             # 6~7) Step8 선택이 5~11이면 페이지다운 후 진행
             did_pagedown = prepare_step8_view(step8_idx)
@@ -1112,10 +1444,10 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
 
     steps = [
         ("로딩 감지(대기)", wait_loading_done_auto),
-        ("포커스 고정", lambda: (pyautogui.click(FOCUS_X, FOCUS_Y), time.sleep(get_float_setting(delay_focus_wait, 0.5)))),
-        ("좌표 270,725 더블클릭", lambda: (pyautogui.doubleClick(270, 725), time.sleep(float(delay_autocomplete.get())))),
+        ("포커스 고정", lambda: (pyautogui.click(apply_x_offset(FOCUS_X), apply_y_offset(FOCUS_Y)), time.sleep(get_float_setting(delay_focus_wait, 0.5)))),
+        ("좌표 270,725 더블클릭", lambda: (pyautogui.doubleClick(apply_x_offset(270), apply_y_offset(725)), time.sleep(float(delay_autocomplete.get())))),
         ("참가자명 자동완성 1", lambda: (action_min_yonggi_final(), time.sleep(float(delay_autocomplete.get())))),
-        ("좌표 270,795 클릭", lambda: (pyautogui.click(270, 795), time.sleep(float(delay_autocomplete.get())))),
+        ("좌표 270,795 클릭", lambda: (pyautogui.click(apply_x_offset(270), apply_y_offset(795)), time.sleep(float(delay_autocomplete.get())))),
         ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
     ]
 
@@ -1124,9 +1456,9 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
         steps.append(("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))))
 
     steps += [
-        ("좌표 270,880 포커스 보정", lambda: (pyautogui.doubleClick(270, 880), time.sleep(float(delay_autocomplete.get()) + 0.15))),
+        ("좌표 270,880 포커스 보정", lambda: (pyautogui.doubleClick(apply_x_offset(270), apply_y_offset(880)), time.sleep(float(delay_autocomplete.get()) + 0.15))),
         ("참가자명 자동완성 2", lambda: (action_shin_myeongsik(), time.sleep(float(delay_autocomplete.get())))),
-        ("좌표 270,920 클릭", lambda: (pyautogui.click(270, 920), time.sleep(float(delay_autocomplete.get())))),
+        ("좌표 270,920 클릭", lambda: (pyautogui.click(apply_x_offset(270), apply_y_offset(920)), time.sleep(float(delay_autocomplete.get())))),
         ("탭", lambda: (pyautogui.press("tab"), time.sleep(float(delay_autocomplete.get())))),
     ]
 
@@ -1165,6 +1497,9 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
         add_step_log("C99", "최종 ENTER", "START")
         pyautogui.press("enter")
         add_step_log("C99", "최종 ENTER", "OK")
+
+    if AUTO_BACKUP_ON_SUCCESS:
+        create_backup(show_popup=False)
 
     msg.showinfo("완료", "모든 자동화 순서가 완료되었습니다!")
 
@@ -1349,7 +1684,7 @@ def show_flow_coordinate_table():
         ("A", "A03", "초기 포커스 클릭", f"{FOCUS_X},{FOCUS_Y}", f"{delay_autocomplete.get()}초", "1회 실행"),
         ("B", "B01", "NAV 클릭", f"{NAV_X},{NAV_Y}", f"{delay_loop_wait.get()}초", "클릭 후 루프 대기"),
         ("B", "B02", "로딩 색상 감지", "95,63", f"최대 {delay_loading.get()}초", f"감지 완료 후 {delay_post_loading.get()}초(+루프 {delay_loop_wait.get()}초) 대기"),
-        ("B", "B03", "Step8 목록 이동", f"{STEP8_LIST_X},{STEP8_LIST_Y}", "1.0초", "클릭 후 1.0초 대기"),
+        ("B", "B03", "Step8 목록 이동", f"{STEP8_LIST_X},{STEP8_LIST_Y}", "1.0초", "참가자신청 텍스트 클릭 우선, 실패 시 좌표 폴백"),
         ("B", "B04", "Step8 화면 준비", "PageDown 조건", "1.0초", "선택값 5~10일 때 pagedown 후 안정화"),
         ("B", "B05", "부서 텍스트 감지", detect_coord_text, "즉시", f"선택번호 {detect_idx + 1}"),
         ("B", "B06", "Step8 색상검사+더블클릭", selected_step8_coord, f"{delay_step8.get()}초", f"색상확인/더블클릭 후 대기 | 선택번호 {step8_idx + 1}"),
