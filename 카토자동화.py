@@ -39,6 +39,7 @@ from selenium.webdriver.support import expected_conditions as EC
 
 STOP_FLAG = False
 RUNNING = False
+REFRESH_LOOP_TOKEN = 0
 captured_positions = []
 
 BASE_DIR = r"C:\Users\Desktop\자동화"
@@ -555,7 +556,7 @@ def auto_calculate_times():
     sync_hour_var.set(sync_time.hour)
     sync_min_var.set(sync_time.minute)
 
-    end_time = datetime.datetime(2024, 1, 1, h, m) - datetime.timedelta(minutes=5)
+    end_time = datetime.datetime(2024, 1, 1, h, m) - datetime.timedelta(minutes=10)
     refresh_end_hour.set(end_time.hour)
     refresh_end_min.set(end_time.minute)
 
@@ -778,6 +779,11 @@ def fill_contact_and_payer_dom():
 def fill_contact_and_payer_with_fallback():
         """DOM 직접입력을 우선 시도하고, 실패 시 기존 탭 기반 키보드 입력으로 폴백한다."""
         if fill_contact_and_payer_dom():
+                if receive_mode.get() == "RECEIVE":
+                        time.sleep(float(delay_autocomplete.get()))
+                        pyautogui.press("tab")
+                        time.sleep(float(delay_autocomplete.get()))
+                        pyautogui.press("tab")
                 time.sleep(float(delay_autocomplete.get()))
                 return
 
@@ -1399,12 +1405,14 @@ def run_after_step8():
 # ============================================================
 
 def run_manual_participants():
-    global RUNNING, STOP_FLAG
+    global RUNNING, STOP_FLAG, REFRESH_LOOP_TOKEN
 
     if RUNNING:
         msg.showwarning("이미 실행 중", "자동화가 이미 실행되고 있습니다.")
         return
 
+    # 수동 실행 진입 시 기존 새로고침 루프를 무효화한다.
+    REFRESH_LOOP_TOKEN += 1
     RUNNING = True
     STOP_FLAG = False
 
@@ -1619,15 +1627,15 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
 # 새로고침 루프
 # ============================================================
 
-def refresh_loop():
-    global STOP_FLAG
+def refresh_loop(refresh_token):
+    global STOP_FLAG, RUNNING, REFRESH_LOOP_TOKEN
 
     try:
         sh = int(refresh_start_hour.get())
         sm = int(refresh_start_min.get())
         eh = int(refresh_end_hour.get())
         em = int(refresh_end_min.get())
-        interval = int(refresh_interval.get())
+        interval = 10
     except:
         return
 
@@ -1635,12 +1643,12 @@ def refresh_loop():
     end = datetime.datetime.now().replace(hour=eh, minute=em, second=0, microsecond=0)
 
     while datetime.datetime.now() < start:
-        if STOP_FLAG:
+        if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
             return
         time.sleep(1)
 
     while datetime.datetime.now() < end:
-        if STOP_FLAG:
+        if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
             return
 
         if REFRESH_PAUSED:
@@ -1655,7 +1663,7 @@ def refresh_loop():
         next_refresh = datetime.datetime.now() + datetime.timedelta(minutes=interval)
 
         while datetime.datetime.now() < next_refresh:
-            if STOP_FLAG:
+            if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
                 return
             time.sleep(1)
 
@@ -1666,10 +1674,11 @@ def refresh_loop():
 # ============================================================
 
 def stop_automation(source="manual"):
-    global STOP_FLAG
+    global STOP_FLAG, REFRESH_LOOP_TOKEN
     if STOP_FLAG:
         return
     STOP_FLAG = True
+    REFRESH_LOOP_TOKEN += 1
     add_log(f"자동화 중단 요청: source={source}")
 
 def esc_listener():
@@ -1715,7 +1724,7 @@ def run_automation_thread(step8_idx, step8_coords, immediate_start=False):
         RUNNING = False
 
 def start_automation(immediate_start=False):
-    global STOP_FLAG, RUNNING, sync_done
+    global STOP_FLAG, RUNNING, sync_done, REFRESH_LOOP_TOKEN
 
     if RUNNING:
         msg.showwarning("이미 실행 중", "자동화가 이미 실행되고 있습니다.")
@@ -1724,6 +1733,8 @@ def start_automation(immediate_start=False):
     RUNNING = True
     STOP_FLAG = False
     sync_done = False
+    REFRESH_LOOP_TOKEN += 1
+    refresh_token = REFRESH_LOOP_TOKEN
 
     # 부서 감지가 필요한 경우 Selenium driver 연결이 필수다.
     if department_var.get().strip():
@@ -1753,7 +1764,7 @@ def start_automation(immediate_start=False):
         f"부서감지번호={detect_idx + 1}, 부서감지좌표={detect_coord}, immediate_start={immediate_start}"
     )
 
-    threading.Thread(target=refresh_loop, daemon=True).start()
+    threading.Thread(target=refresh_loop, args=(refresh_token,), daemon=True).start()
     threading.Thread(
         target=run_automation_thread,
         args=(step8_idx, step8_coords, immediate_start),
