@@ -1,4 +1,5 @@
 import ctypes, sys
+import subprocess
 
 def ensure_admin():
     try:
@@ -7,8 +8,9 @@ def ensure_admin():
         is_admin = False
 
     if not is_admin:
+        params = subprocess.list2cmdline(sys.argv)
         ctypes.windll.shell32.ShellExecuteW(
-            None, "runas", sys.executable, " ".join(sys.argv), None, 1
+            None, "runas", sys.executable, params, None, 1
         )
         sys.exit()
 
@@ -284,7 +286,7 @@ def get_float_setting(var_obj, default_value):
 # Chrome 연결
 # ============================================================
 
-def connect_chrome():
+def connect_chrome(show_error=True):
     global driver
     try:
         chrome_options = Options()
@@ -292,7 +294,8 @@ def connect_chrome():
         driver = webdriver.Chrome(options=chrome_options)
         return driver
     except:
-        msg.showerror("Chrome 연결 실패", "Chrome 디버깅 모드가 실행 중인지 확인하세요.")
+        if show_error:
+            msg.showerror("Chrome 연결 실패", "Chrome 디버깅 모드가 실행 중인지 확인하세요.")
         return None
 
 def open_kato(show_success_popup=True):
@@ -639,6 +642,123 @@ def auto_select_with_hover(start_x, start_y):
     time.sleep(float(delay_autocomplete.get()))
     pyautogui.press("tab")
 
+def resolve_exact_autocomplete_label(name_text, role):
+    name = name_text.strip()
+    if role == "participant" and name == "민용기":
+        return "민용기 [광명테사모]"
+    if role == "partner" and name == "신명식":
+        return "신명식 [광명테사모 용인랠리]"
+    return name
+
+def is_driver_alive(instance):
+    try:
+        if instance is None:
+            return False
+        instance.execute_script("return document.readyState")
+        return True
+    except Exception:
+        return False
+
+def ensure_dom_driver_connected():
+    """DOM 자동완성 선택 전에 Selenium 연결을 보장한다."""
+    global driver, wait
+    if is_driver_alive(driver):
+        return True
+
+    driver = None
+
+    # 1차: 조용히 기존 디버깅 세션에 연결 시도
+    driver = connect_chrome(show_error=False)
+    if driver is None:
+        add_log("DOM 연결: 기존 디버깅 세션 미연결, Chrome 디버깅 실행 시도")
+        # 2차: 디버깅 크롬을 자동 실행 후 재연결 시도
+        chrome_path = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+        debug_dir = r"C:\ChromeDebug"
+        try:
+            os.system(f'start "" "{chrome_path}" --remote-debugging-port=9222 --user-data-dir="{debug_dir}"')
+        except Exception:
+            return False
+
+        for _ in range(30):
+            time.sleep(0.5)
+            driver = connect_chrome(show_error=False)
+            if driver is not None:
+                break
+
+    if not is_driver_alive(driver):
+        driver = None
+        return False
+
+    wait = WebDriverWait(driver, 2)
+    add_log("DOM 연결: Selenium driver 연결 성공")
+    return True
+
+def select_autocomplete_exact_dom(expected_label, timeout_sec=3.5):
+    """자동완성 목록에서 expected_label과 완전 일치하는 항목만 클릭 선택한다."""
+    if not ensure_dom_driver_connected():
+        raise RuntimeError("DOM 자동완성 선택 실패: Selenium driver 미연결")
+
+    script = """
+    const expectedRaw = arguments[0];
+    const expected = (expectedRaw || '').replace(/\s+/g, ' ').trim();
+
+    function norm(t) {
+        return (t || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function isVisible(el) {
+        if (!el) return false;
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || 1) === 0) {
+            return false;
+        }
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+    }
+
+    const sel = [
+        '[role="option"]',
+        'li',
+        '.ui-menu-item',
+        '.autocomplete-item',
+        '.tt-suggestion',
+        '.suggest-item'
+    ].join(',');
+
+    const nodes = Array.from(document.querySelectorAll(sel)).filter(isVisible);
+    const labeled = nodes.map(n => ({ el: n, text: norm(n.innerText || n.textContent || '') }))
+                         .filter(x => x.text.length > 0);
+
+    const exact = labeled.find(x => x.text === expected);
+    if (exact) {
+        exact.el.scrollIntoView({ block: 'nearest' });
+        exact.el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true }));
+        exact.el.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+        exact.el.click();
+        return { status: 'selected', text: exact.text, count: labeled.length };
+    }
+
+    return {
+        status: labeled.length > 0 ? 'list-no-exact' : 'list-not-ready',
+        count: labeled.length,
+        preview: labeled.slice(0, 5).map(x => x.text)
+    };
+    """
+
+    deadline = time.time() + timeout_sec
+    last = None
+    while time.time() < deadline:
+        last = driver.execute_script(script, expected_label) or {}
+        if last.get("status") == "selected":
+            time.sleep(min(0.12, float(delay_autocomplete.get())))
+            pyautogui.press("tab")
+            return
+        time.sleep(0.06)
+
+    status = (last or {}).get("status", "unknown")
+    preview = (last or {}).get("preview", [])
+    raise RuntimeError(f"DOM 자동완성 1순위 실패: expected='{expected_label}', status={status}, preview={preview}")
+
 def action_min_yonggi_final():
     x_click = apply_x_offset(270)
     y1 = apply_y_offset(725)
@@ -649,7 +769,8 @@ def action_min_yonggi_final():
     pyperclip.copy(name1_var.get())
     pyautogui.hotkey("ctrl", "v")
     time.sleep(float(delay_autocomplete.get()))
-    auto_select_with_hover(x_click, y2)
+    expected_label = resolve_exact_autocomplete_label(name1_var.get(), "participant")
+    select_autocomplete_exact_dom(expected_label)
 
 def action_shin_myeongsik():
     x_click = apply_x_offset(270)
@@ -661,7 +782,8 @@ def action_shin_myeongsik():
     pyperclip.copy(name2_var.get())
     pyautogui.hotkey("ctrl", "v")
     time.sleep(float(delay_autocomplete.get()))
-    auto_select_with_hover(x_click, y2)
+    expected_label = resolve_exact_autocomplete_label(name2_var.get(), "partner")
+    select_autocomplete_exact_dom(expected_label)
 
 def action_min_yonggi_payment():
     pyperclip.copy(payer_var.get())
@@ -679,7 +801,7 @@ def fill_contact_and_payer_dom():
                 return False
 
         payer_name = payer_var.get().strip()
-        script = """
+        script = r"""
         const phoneMid = arguments[0];
         const phoneLast = arguments[1];
         const payer = arguments[2];
