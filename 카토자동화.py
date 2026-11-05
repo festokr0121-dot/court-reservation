@@ -1416,6 +1416,15 @@ def run_manual_participants():
     RUNNING = True
     STOP_FLAG = False
 
+    # 수동 시작 시에는 새로고침을 1회만 즉시 실행한다.
+    try:
+        pyautogui.click(766, 373)
+        time.sleep(float(delay_autocomplete.get()))
+        pyautogui.press("f5")
+        add_log("수동 시작: 새로고침 1회 실행")
+    except Exception as e:
+        add_log(f"수동 시작 새로고침 1회 실패: {e}")
+
     def _runner():
         global RUNNING
         try:
