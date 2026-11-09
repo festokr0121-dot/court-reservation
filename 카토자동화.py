@@ -698,7 +698,7 @@ def select_autocomplete_exact_dom(expected_label, timeout_sec=3.5):
     if not ensure_dom_driver_connected():
         raise RuntimeError("DOM 자동완성 선택 실패: Selenium driver 미연결")
 
-    script = """
+    script = r"""
     const expectedRaw = arguments[0];
     const expected = (expectedRaw || '').replace(/\s+/g, ' ').trim();
 
@@ -1319,6 +1319,55 @@ def is_step8_color(x, y):
                 return True
     return False
 
+def is_step8_anchor_rgb(x, y, target_rgb=(33, 123, 178), tol=12):
+    """부서 감지 진입 전 확인용 기준 색상 검사."""
+    tr, tg, tb = target_rgb
+    sample_offsets = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
+    for dx, dy in sample_offsets:
+        r, g, b = pyautogui.pixel(x + dx, y + dy)
+        if abs(r - tr) <= tol and abs(g - tg) <= tol and abs(b - tb) <= tol:
+            return True
+    return False
+
+def wait_step8_anchor_before_department(idx, step8_coords, timeout_sec=1.5, poll_sec=0.05):
+    """B05(부서 감지) 시작 전 Step8 기준 RGB가 보일 때까지 짧게 대기한다."""
+    global CURRENT_Y_OFFSET_PX
+
+    coord = step8_coords[idx]
+    if coord is None:
+        add_log(f"Step8 사전 RGB 검사 스킵: 좌표 없음 idx={idx}")
+        return False
+
+    raw_x, raw_y = coord
+    shift39 = get_long_title_retry_shift_px()
+
+    if LOCK_Y_OFFSET_TO_39:
+        y_offset_candidates = [shift39]
+    else:
+        y_offset_candidates = []
+        for off in [CURRENT_Y_OFFSET_PX, 0, shift39]:
+            if off not in y_offset_candidates:
+                y_offset_candidates.append(off)
+
+    start = time.time()
+    while (time.time() - start) < timeout_sec:
+        for y_off in y_offset_candidates:
+            x = int(round(raw_x + CURRENT_X_OFFSET_PX))
+            y = int(round(raw_y + y_off))
+            if is_step8_anchor_rgb(x, y):
+                if (not LOCK_Y_OFFSET_TO_39) and (y_off != CURRENT_Y_OFFSET_PX):
+                    add_log(f"Step8 사전 RGB y_offset 자동보정: {CURRENT_Y_OFFSET_PX} -> {y_off}")
+                    CURRENT_Y_OFFSET_PX = y_off
+                add_log(f"Step8 사전 RGB 감지 성공: idx={idx}, coord=({x},{y}), rgb=(33,123,178), y_offset={y_off}")
+                return True
+        time.sleep(poll_sec)
+
+    add_log(
+        f"Step8 사전 RGB 대기 타임아웃({timeout_sec:.2f}s): idx={idx}, rgb=(33,123,178), "
+        f"x_offset={CURRENT_X_OFFSET_PX}, y_candidates={y_offset_candidates}"
+    )
+    return False
+
 def wait_for_step8_color_ready(x, y, timeout_sec=2.5, poll_sec=0.05):
     start = time.time()
     while (time.time() - start) < timeout_sec:
@@ -1674,6 +1723,21 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
             if did_pagedown:
                 # 페이지 전환 후 DOM/화면 안정화 대기
                 time.sleep(1.0)
+
+            # B05 전 사전 조건: Step8 좌표 기준 RGB(33,123,178) 감지 확인
+            add_step_log("B04.5", "Step8 사전 RGB 확인", "START", "rgb=(33,123,178)")
+            precheck_timeout = max(1.0, float(delay_step8.get()) * 6)
+            if not wait_step8_anchor_before_department(
+                step8_idx,
+                step8_coords,
+                timeout_sec=precheck_timeout,
+                poll_sec=0.05,
+            ):
+                add_step_log("B04.5", "Step8 사전 RGB 확인", "FAIL", f"timeout={precheck_timeout:.2f}s")
+                restore_step8_view_if_needed(did_pagedown)
+                time.sleep(float(delay_autocomplete.get()))
+                continue
+            add_step_log("B04.5", "Step8 사전 RGB 확인", "OK")
 
             # 8) 부서 감지 (Step8 행 좌측 텍스트 기준)
             add_step_log("B05", "부서 텍스트 감지", "START", f"step8={step8_idx+1}, dept={department_var.get()}")
