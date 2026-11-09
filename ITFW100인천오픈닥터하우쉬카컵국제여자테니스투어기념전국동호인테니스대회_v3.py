@@ -571,10 +571,39 @@ def auto_calculate_times():
     end_time = datetime.datetime(2024, 1, 1, h, m) - datetime.timedelta(minutes=10)
     refresh_end_hour.set(end_time.hour)
     refresh_end_min.set(end_time.minute)
+    refresh_interval.set("10")
 
     now = datetime.datetime.now()
     refresh_start_hour.set(now.hour)
     refresh_start_min.set(now.minute)
+
+def get_refresh_schedule_from_reservation(now_dt=None):
+    """예약 시작 시각 기준으로 새로고침 스케줄을 계산한다.
+    - 시작: 현재 시각
+    - 종료: 예약 시작 10분 전
+    - 간격: 10분
+    """
+    if now_dt is None:
+        now_dt = datetime.datetime.now()
+
+    hour = int(hour_var.get())
+    minute = int(min_var.get())
+    second = int(sec_var.get())
+
+    reservation_dt = datetime.datetime(
+        now_dt.year,
+        now_dt.month,
+        now_dt.day,
+        hour,
+        minute,
+        second,
+    )
+    if reservation_dt < now_dt:
+        reservation_dt += datetime.timedelta(days=1)
+
+    refresh_end_dt = reservation_dt - datetime.timedelta(minutes=10)
+    refresh_interval_min = 10
+    return now_dt, refresh_end_dt, refresh_interval_min
 
 # ============================================================
 # 로딩 감지 (완성본)
@@ -1723,10 +1752,35 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
                 timeout_sec=precheck_timeout,
                 poll_sec=0.05,
             ):
-                add_step_log("B04.5", "Step8 사전 RGB 확인", "FAIL", f"timeout={precheck_timeout:.2f}s")
-                restore_step8_view_if_needed(did_pagedown)
-                time.sleep(float(delay_autocomplete.get()))
-                continue
+                add_step_log("B04.5", "Step8 사전 RGB 확인", "RETRY", "0.1초 대기 후 참가신청 목록 재클릭")
+                time.sleep(0.1)
+
+                # 1회 재시도: 참가신청 목록 재클릭 후 Step8 화면을 다시 준비하고 RGB를 재검사한다.
+                add_step_log("B04.6", "Step8 목록 재클릭", "START", f"coord=({STEP8_LIST_X},{STEP8_LIST_Y})")
+                b03_retry_mode = click_step8_list_entry_with_text_first()
+                time.sleep(POST_B03_SETTLE_SEC)
+                add_step_log("B04.6", "Step8 목록 재클릭", "OK", f"mode={b03_retry_mode}, y_offset={CURRENT_Y_OFFSET_PX}")
+
+                if b03_retry_mode == "no-detect":
+                    add_step_log("B04.6", "Step8 목록 재클릭", "FAIL", "1/2 박스 미감지 - 루프 재시도")
+                    time.sleep(float(delay_autocomplete.get()))
+                    continue
+
+                did_pagedown = prepare_step8_view(step8_idx)
+                add_step_log("B04.7", "Step8 화면 재준비", "OK", f"did_pagedown={did_pagedown}")
+                if did_pagedown:
+                    time.sleep(POST_PAGEDOWN_SETTLE_SEC)
+
+                if not wait_step8_anchor_before_department(
+                    step8_idx,
+                    step8_coords,
+                    timeout_sec=precheck_timeout,
+                    poll_sec=0.05,
+                ):
+                    add_step_log("B04.5", "Step8 사전 RGB 확인", "FAIL", f"retry-timeout={precheck_timeout:.2f}s")
+                    restore_step8_view_if_needed(did_pagedown)
+                    time.sleep(float(delay_autocomplete.get()))
+                    continue
             add_step_log("B04.5", "Step8 사전 RGB 확인", "OK")
 
             # 8) 부서 감지 (Step8 행 좌측 텍스트 기준)
@@ -1816,41 +1870,73 @@ def refresh_loop(refresh_token):
     global STOP_FLAG, RUNNING, REFRESH_LOOP_TOKEN
 
     try:
-        sh = int(refresh_start_hour.get())
-        sm = int(refresh_start_min.get())
-        eh = int(refresh_end_hour.get())
-        em = int(refresh_end_min.get())
-        interval = 10
-    except:
+        start, end, interval_min = get_refresh_schedule_from_reservation()
+    except Exception as e:
+        add_log(f"새로고침 스케줄 계산 실패: {e}")
         return
 
-    start = datetime.datetime.now().replace(hour=sh, minute=sm, second=0, microsecond=0)
-    end = datetime.datetime.now().replace(hour=eh, minute=em, second=0, microsecond=0)
+    refresh_start_hour.set(start.hour)
+    refresh_start_min.set(start.minute)
+    refresh_end_hour.set(end.hour)
+    refresh_end_min.set(end.minute)
+    refresh_interval.set(str(interval_min))
 
-    while datetime.datetime.now() < start:
-        if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
-            return
-        time.sleep(1)
+    add_log(
+        "새로고침 스케줄: "
+        f"start={start.strftime('%Y-%m-%d %H:%M:%S')}, "
+        f"end={end.strftime('%Y-%m-%d %H:%M:%S')} (예약 10분 전), "
+        f"interval={interval_min}분"
+    )
 
-    while datetime.datetime.now() < end:
-        if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
-            return
+    if start >= end:
+        add_log("새로고침 스킵: 현재 시각이 예약 10분 전 이후입니다.")
+        return
 
-        if REFRESH_PAUSED:
+    def _should_stop():
+        return STOP_FLAG or (not RUNNING) or (refresh_token != REFRESH_LOOP_TOKEN)
+
+    def _wait_until(target_dt):
+        while datetime.datetime.now() < target_dt:
+            if _should_stop():
+                return False
+            time.sleep(0.2)
+        return True
+
+    def _run_refresh_once(label):
+        while REFRESH_PAUSED:
+            if _should_stop():
+                return False
             # Step8 감지/클릭 구간에서는 화면 변경을 멈춰 충돌을 줄인다.
             time.sleep(0.2)
-            continue
 
-        pyautogui.click(766, 373)
-        time.sleep(float(delay_autocomplete.get()))
-        pyautogui.press("f5")
+        try:
+            pyautogui.click(766, 373)
+            time.sleep(float(delay_autocomplete.get()))
+            pyautogui.press("f5")
+            add_log(f"새로고침 실행: {label} at={datetime.datetime.now().strftime('%H:%M:%S')}")
+            return True
+        except pyautogui.FailSafeException:
+            add_log("새로고침 스킵: PyAutoGUI FailSafe 감지(마우스 코너 위치)")
+            # 사용자가 코너로 마우스를 이동한 상황에서는 스레드를 죽이지 않고 다음 주기로 진행한다.
+            return True
+        except Exception as e:
+            add_log(f"새로고침 실행 예외: {e}")
+            # 일시 오류는 스레드 종료 대신 다음 주기에 재시도한다.
+            return True
 
-        next_refresh = datetime.datetime.now() + datetime.timedelta(minutes=interval)
+    # 시작 시각부터 종료(예약 10분 전) 직전까지는 10분 단위로 주기 새로고침.
+    next_refresh_at = start
+    while next_refresh_at < end:
+        if not _wait_until(next_refresh_at):
+            return
+        if not _run_refresh_once("주기"):
+            return
+        next_refresh_at += datetime.timedelta(minutes=interval_min)
 
-        while datetime.datetime.now() < next_refresh:
-            if STOP_FLAG or not RUNNING or refresh_token != REFRESH_LOOP_TOKEN:
-                return
-            time.sleep(1)
+    # 종료 시각(예약 10분 전)에는 마지막 새로고침을 정확히 1회 실행.
+    if not _wait_until(end):
+        return
+    _run_refresh_once("마지막(예약 10분 전)")
 
 
 
