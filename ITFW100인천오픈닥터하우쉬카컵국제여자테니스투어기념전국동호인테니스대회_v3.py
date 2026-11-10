@@ -1745,7 +1745,7 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
 
             # B05 전 사전 조건: Step8 좌표 기준 RGB(33,123,178) 감지 확인
             add_step_log("B04.5", "Step8 사전 RGB 확인", "START", "rgb=(33,123,178)")
-            precheck_timeout = max(1.0, float(delay_step8.get()) * 6)
+            precheck_timeout = max(0.6, float(delay_step8.get()) * 4)
             if not wait_step8_anchor_before_department(
                 step8_idx,
                 step8_coords,
@@ -1758,7 +1758,7 @@ def run_automation(step8_idx, step8_coords, immediate_start=False):
                 # 1회 재시도: 참가신청 목록 재클릭 후 Step8 화면을 다시 준비하고 RGB를 재검사한다.
                 add_step_log("B04.6", "Step8 목록 재클릭", "START", f"coord=({STEP8_LIST_X},{STEP8_LIST_Y})")
                 b03_retry_mode = click_step8_list_entry_with_text_first()
-                time.sleep(POST_B03_SETTLE_SEC)
+                time.sleep(0.3)
                 add_step_log("B04.6", "Step8 목록 재클릭", "OK", f"mode={b03_retry_mode}, y_offset={CURRENT_Y_OFFSET_PX}")
 
                 if b03_retry_mode == "no-detect":
