@@ -26,6 +26,7 @@ from tkinter import ttk
 import threading
 import datetime
 import time
+import random
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -59,6 +60,8 @@ sync_done = False
 LAST_MATCHED_ROW_INDEX = None
 LAST_STEP8_DETECTED_POINT = None
 REFRESH_PAUSED = False
+REFRESH_INTERVAL_MINUTES = 10
+REFRESH_INTERVAL_JITTER_SECONDS = 10
 
 FOCUS_X, FOCUS_Y = 766, 733
 NAV_X, NAV_Y = 100, 60
@@ -601,7 +604,7 @@ def get_refresh_schedule_from_reservation(now_dt=None):
         reservation_dt += datetime.timedelta(days=1)
 
     refresh_end_dt = reservation_dt - datetime.timedelta(minutes=10)
-    refresh_interval_min = 10
+    refresh_interval_min = REFRESH_INTERVAL_MINUTES
     return now_dt, refresh_end_dt, refresh_interval_min
 
 # ============================================================
@@ -1882,7 +1885,7 @@ def refresh_loop():
         "새로고침 스케줄: "
         f"start={start.strftime('%Y-%m-%d %H:%M:%S')}, "
         f"end={end.strftime('%Y-%m-%d %H:%M:%S')} (예약 10분 전), "
-        f"interval={interval_min}분"
+        f"interval={interval_min}분±{REFRESH_INTERVAL_JITTER_SECONDS}초"
     )
 
     if start >= end:
@@ -1921,14 +1924,16 @@ def refresh_loop():
             # 일시 오류는 스레드 종료 대신 다음 주기에 재시도한다.
             return True
 
-    # 시작 시각부터 종료(예약 10분 전) 직전까지는 10분 단위로 주기 새로고침.
+    # 시작 시각부터 종료(예약 10분 전) 직전까지는 10분±10초 단위로 주기 새로고침.
     next_refresh_at = start
     while next_refresh_at < end:
         if not _wait_until(next_refresh_at):
             return
         if not _run_refresh_once("주기"):
             return
-        next_refresh_at += datetime.timedelta(minutes=interval_min)
+        jitter_seconds = random.randint(-REFRESH_INTERVAL_JITTER_SECONDS, REFRESH_INTERVAL_JITTER_SECONDS)
+        next_interval_seconds = max(1, interval_min * 60 + jitter_seconds)
+        next_refresh_at += datetime.timedelta(seconds=next_interval_seconds)
 
     # 종료 시각(예약 10분 전)에는 마지막 새로고침을 정확히 1회 실행.
     if not _wait_until(end):
