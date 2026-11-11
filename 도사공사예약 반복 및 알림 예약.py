@@ -6,6 +6,7 @@ import json
 import threading
 import colorsys
 import math
+import random
 import re
 import tkinter as tk
 from tkinter import ttk
@@ -907,6 +908,81 @@ def focus_reservation_window(allow_click_fallback=True):
         return True
     except Exception:
         return False
+
+
+def send_pageup_to_reservation_window(
+    action,
+    click_page=True,
+    focus_click_position=(REFRESH_FOCUS_X, REFRESH_FOCUS_Y),
+):
+    hwnd = get_browser_hwnd()
+    if not hwnd and click_page:
+        try:
+            hwnd = get_browser_hwnd_by_click()
+        except Exception:
+            hwnd = None
+    if not hwnd:
+        print(f"[PAGEUP-FAIL] action={action} reason=reservation-window-not-found")
+        return False
+
+    if click_page and not focus_reservation_window():
+        print(f"[PAGEUP-FAIL] action={action} reason=focus-failed")
+        return False
+
+    ctypes.windll.user32.SetForegroundWindow(hwnd)
+    if not safe_sleep(0.05):
+        return False
+
+    initial_foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+    if initial_foreground_hwnd != hwnd:
+        print(
+            f"[PAGEUP-FAIL] action={action} reason=window-not-foreground "
+            f"target_hwnd={hwnd} foreground_hwnd={initial_foreground_hwnd}"
+        )
+        return False
+
+    if click_page:
+        logged_click(
+            focus_click_position[0],
+            focus_click_position[1],
+            action="PageUp 웹페이지 포커스",
+        )
+        if not safe_sleep(REFRESH_PRE_F5_DELAY_SEC):
+            return False
+    post_focus_hwnd = ctypes.windll.user32.GetForegroundWindow()
+
+    timestamp = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+    try:
+        pyautogui.press("pageup")
+        print(
+            f"[KEY] {timestamp} key=pageup count=1/1 method=pyautogui "
+            f"target_hwnd={hwnd} initial_foreground_hwnd={initial_foreground_hwnd} "
+            f"post_focus_hwnd={post_focus_hwnd}"
+        )
+    except Exception:
+        try:
+            keyboard.send("page up")
+            print(f"[KEY] {timestamp} key=pageup count=1/1 method=keyboard.send")
+        except Exception:
+            try:
+                keyboard.press_and_release("page up")
+                print(
+                    f"[KEY] {timestamp} key=pageup count=1/1 "
+                    "method=keyboard.press_and_release"
+                )
+            except Exception as exc:
+                print(
+                    f"[PAGEUP-FAIL] action={action} reason=key-send-error error={exc}"
+                )
+                return False
+
+    print(
+        f"[PAGEUP] {datetime.datetime.now():%Y-%m-%d %H:%M:%S} "
+        f"action={action} target_hwnd={hwnd} "
+        f"initial_foreground_hwnd={initial_foreground_hwnd} "
+        f"post_focus_hwnd={post_focus_hwnd}"
+    )
+    return True
 
 
 def send_refresh_f5():
@@ -3536,7 +3612,8 @@ def clear_manual_start_popup():
             stable_hits += 1
             if stable_hits >= WINDOW_CLOSE_STABLE_HITS:
                 if name == "devtools":
-                    pyautogui.press("pageup")
+                    if not send_pageup_to_reservation_window("manual-devtools-close"):
+                        return "STOP"
                     if not safe_sleep(MANUAL_DEV_POPUP_PAGE_UP_DELAY_SEC):
                         return "STOP"
                 print(f"[MANUAL-POPUP] 닫힘 확인 type={name} → 시작 전 검사부터 재시작")
@@ -3676,7 +3753,9 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
                 auto_repeat_armed = True
                 sync_done_for_target = False
                 refresh_stop_guard_enabled = True
-                next_auto_run_at = time.time() + get_refresh_interval_seconds()
+                next_auto_run_at = time.time() + get_randomized_interval_seconds(
+                    get_refresh_interval_seconds(), 10
+                )
         else:
             status.set("시작 확인용 새로고침 1회 실패")
 
@@ -3852,7 +3931,9 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
                 stop_all_automation("❌ 시간창 정리/닫힘 확인 실패 - 자동 시작 중단")
                 return
 
-            pyautogui.press("pageup")
+            if not send_pageup_to_reservation_window("auto-time-window-retry"):
+                stop_all_automation("❌ 예약 브라우저 포커스 실패 - PageUp 중단")
+                return
             print("[AUTO-START] 시간창 정리 후 PageUp 전송 → 관내예약부터 재시작")
             if not safe_sleep(AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC):
                 status.set("⚠ ESC로 취소됨")
@@ -3909,19 +3990,27 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
     if f2_mode_var.get() == "manual" and is_auto_repeat_on() and not emergency_stop:
         repeat_seconds = get_repeat_wait_seconds()
         auto_repeat_armed = True
-        next_auto_run_at = time.time() + repeat_seconds
+        next_auto_run_at = time.time() + get_randomized_interval_seconds(
+            repeat_seconds, 2
+        )
     elif f2_mode_var.get() == "auto" and refresh_repeat_enabled and not emergency_stop:
         repeat_seconds = get_repeat_wait_seconds()
         auto_repeat_armed = True
-        next_auto_run_at = time.time() + repeat_seconds
+        next_auto_run_at = time.time() + get_randomized_interval_seconds(
+            repeat_seconds, 2
+        )
 
 
 def finish_manual_reservation_list():
     """마지막 항목까지 처리한 수동 예약 목록을 페이지업으로 종료한다."""
     if not safe_sleep(AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC):
         return False
-    pyautogui.press("pageup")
-    print("[MANUAL-END] 예약 목록 처리 종료 - PageUp 전송")
+    if not send_pageup_to_reservation_window(
+        "manual-list-finished", focus_click_position=(900, 990)
+    ):
+        status.set("❌ 예약 브라우저 포커스 실패 - PageUp 미전송, 반복 중단")
+        return False
+    print("[MANUAL-END] 예약 목록 처리 종료 - 브라우저 포커스 확인 후 PageUp 전송")
     return safe_sleep(AUTO_START_AFTER_LIST_PAGE_UP_DELAY_SEC)
 
 
@@ -4192,7 +4281,9 @@ def add_reservation():
                     added_count += 1
 
     if f2_mode_var.get() == "manual" and is_auto_repeat_on():
-        repeat_seconds = get_repeat_wait_seconds()
+        repeat_seconds = get_randomized_interval_seconds(
+            get_repeat_wait_seconds(), 2
+        )
         added_cooldown_until = time.time() + repeat_seconds
         next_auto_run_at = added_cooldown_until
         auto_repeat_armed = True
@@ -4650,7 +4741,7 @@ ttk.Label(refresh_stop_frame, text="분").grid(row=0, column=1, padx=(4, 0))
 ttk.Label(settings_frame, text="-10분전 마지막 1회 후 종료").grid(row=3, column=3, sticky="w")
 
 ttk.Label(settings_frame, text="4").grid(row=4, column=0, padx=(4, 6), sticky="w")
-ttk.Label(settings_frame, text="새로고침 간격").grid(row=4, column=1, sticky="w")
+ttk.Label(settings_frame, text="새로고침 간격(±10초)").grid(row=4, column=1, sticky="w")
 refresh_interval_frame = ttk.Frame(settings_frame)
 refresh_interval_frame.grid(row=4, column=2, sticky="w")
 ttk.Entry(refresh_interval_frame, textvariable=repeat_time_var, width=6).grid(row=0, column=0, sticky="w")
@@ -4658,7 +4749,7 @@ ttk.Label(refresh_interval_frame, text="초").grid(row=0, column=1, padx=(4, 0))
 ttk.Label(settings_frame, text="F5").grid(row=4, column=3, sticky="w")
 
 ttk.Label(settings_frame, text="5").grid(row=5, column=0, padx=(4, 6), sticky="w")
-ttk.Label(settings_frame, text="예약반복대기(초)").grid(row=5, column=1, sticky="w")
+ttk.Label(settings_frame, text="예약반복대기(±2초)").grid(row=5, column=1, sticky="w")
 repeat_exec_frame = ttk.Frame(settings_frame)
 repeat_exec_frame.grid(row=5, column=2, sticky="w")
 ttk.Entry(repeat_exec_frame, textvariable=repeat_exec_sec_var, width=6).grid(row=0, column=0, sticky="w")
@@ -5232,10 +5323,8 @@ def get_refresh_interval_seconds():
     except Exception:
         return 20
 
-def get_next_refresh_run_at(scheduled_at, now, interval):
-    """Keep the refresh cadence and skip missed slots without catch-up clicks."""
-    intervals = max(1, math.floor((now - scheduled_at) / interval) + 1)
-    return scheduled_at + intervals * interval
+def get_randomized_interval_seconds(base_seconds, jitter_seconds):
+    return max(1, base_seconds + random.randint(-jitter_seconds, jitter_seconds))
 
 def is_repeat_loop_enabled():
     if f2_mode_var.get() == "manual":
@@ -5258,6 +5347,7 @@ def toggle_auto_on():
     emergency_stop = False
     # Start after full interval, not immediately.
     repeat_seconds = get_repeat_wait_seconds()
+    repeat_seconds = get_randomized_interval_seconds(repeat_seconds, 2)
     next_auto_run_at = time.time() + repeat_seconds
     auto_repeat_armed = True
     status.set(f"예약반복대기 ON - {repeat_seconds}초 후 미완료 예약 실행")
@@ -5548,16 +5638,20 @@ def auto_repeat_tick():
 
             refresh_seconds = get_refresh_interval_seconds()
             if next_auto_run_at is None:
-                next_auto_run_at = time.time() + refresh_seconds
+                next_auto_run_at = time.time() + get_randomized_interval_seconds(
+                    refresh_seconds, 10
+                )
 
             now_ts = time.time()
             remaining = int(max(0, next_auto_run_at - now_ts))
 
             if remaining > 0 and (not auto_repeat_running):
-                status.set(f"새로고침 대기 {remaining}초 (간격 {repeat_time_var.get()}초)")
+                status.set(
+                    f"새로고침 대기 {remaining}초 "
+                    f"(기준 간격 {repeat_time_var.get()}초 ±10초)"
+                )
 
             if (not auto_repeat_running) and now_ts >= next_auto_run_at:
-                scheduled_at = next_auto_run_at
                 auto_repeat_running = True
                 try:
                     if not focus_reservation_window():
@@ -5567,7 +5661,7 @@ def auto_repeat_tick():
                     else:
                         if send_refresh_f5():
                             now = datetime.datetime.now().strftime("%H:%M:%S")
-                            status.set(f"새로고침 실행 {now} (다음 {repeat_time_var.get()}초 후)")
+                            status.set(f"새로고침 실행 {now} (다음 간격은 기준값 ±10초)")
                         else:
                             refresh_repeat_enabled = False
                             next_auto_run_at = None
@@ -5575,8 +5669,8 @@ def auto_repeat_tick():
                 finally:
                     auto_repeat_running = False
                     if refresh_repeat_enabled:
-                        next_auto_run_at = get_next_refresh_run_at(
-                            scheduled_at, time.time(), refresh_seconds
+                        next_auto_run_at = time.time() + get_randomized_interval_seconds(
+                            refresh_seconds, 10
                         )
 
             root.after(AUTO_REPEAT_TICK_MS, auto_repeat_tick)
@@ -5602,6 +5696,7 @@ def auto_repeat_tick():
         repeat_seconds = get_repeat_wait_seconds()
 
         if next_auto_run_at is None:
+            repeat_seconds = get_randomized_interval_seconds(repeat_seconds, 2)
             next_auto_run_at = time.time() + repeat_seconds
 
         now_ts = time.time()
@@ -5633,7 +5728,9 @@ def auto_repeat_tick():
             finally:
                 auto_repeat_running = False
                 if not emergency_stop and is_auto_repeat_on() and auto_repeat_armed:
-                    next_auto_run_at = time.time() + get_repeat_wait_seconds()
+                    next_auto_run_at = time.time() + get_randomized_interval_seconds(
+                        get_repeat_wait_seconds(), 2
+                    )
 
     except Exception as e:
         print("자동 체크 오류:", e)
@@ -5708,9 +5805,13 @@ def on_f5_refresh(event=None):
         status.set("F5: 새로고침 종료 시각(목표 -10분) 경과 - 반복 미시작")
         return "break"
     refresh_stop_guard_enabled = True
-    next_auto_run_at = time.time()
-    next_auto_run_at = time.time() + get_refresh_interval_seconds()
-    status.set(f"F5: 새로고침 반복 ON (간격 {repeat_time_var.get()}초)")
+    refresh_seconds = get_randomized_interval_seconds(
+        get_refresh_interval_seconds(), 10
+    )
+    next_auto_run_at = time.time() + refresh_seconds
+    status.set(
+        f"F5: 새로고침 반복 ON (첫 간격 {refresh_seconds}초, 이후 기준값 ±10초)"
+    )
     return "break"
 
 
