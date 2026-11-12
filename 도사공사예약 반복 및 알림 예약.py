@@ -30,10 +30,10 @@ AUTO_START_NOT_PERIOD_COLOR = (0, 0, 0)
 AUTO_START_LOADING_CHECK_X = 56
 AUTO_START_LOADING_CHECK_Y = 60
 AUTO_START_LOADING_COLOR = (39, 35, 32)
+AUTO_START_LOADING_COLOR_TOL = 10
 AUTO_START_LOADING_POLL_SEC = 0.005
 AUTO_START_LOADING_TIMEOUT_SEC = 10.0
 AUTO_START_AFTER_LOADING_DELAY_SEC = 0.1
-AUTO_START_CLICK_MAX_ATTEMPTS = 2
 AUTO_START_RETRY_CLICK_DELAY_SEC = 0.1
 AUTO_START_NEXT_MONTH_CLICK_X = 682
 AUTO_START_NEXT_MONTH_CLICK_Y = 675
@@ -3013,6 +3013,10 @@ def run_reservation(res, time_window_confirmed=False):
                 mark_stage("time", False)
                 if not cancel_time_window_and_continue():
                     return "STOP"
+                if f2_mode_var.get() == "manual":
+                    if not safe_click(900, 990, action="시간창 미오픈 후 예약화면 포커스"):
+                        return "STOP"
+                    print("[TIME-WINDOW-FOCUS] 수동모드 포커스 클릭 coord=(900,990)")
                 return NEXT_RESERVATION_AFTER_ESC
 
             selected_pos, selected_source = detect_time_slot_position(res["time"])
@@ -3475,14 +3479,20 @@ def wait_for_auto_start_response():
                 f"elapsed={now - started_at:.3f}s RGB={color}"
             )
             return result
-        if color == AUTO_START_LOADING_COLOR and loading_started is None:
+        loading_color_matched = color_close(
+            *color,
+            target=AUTO_START_LOADING_COLOR,
+            tol=AUTO_START_LOADING_COLOR_TOL,
+        )
+        if loading_color_matched and loading_started is None:
             loading_started = now
             print(
                 "[AUTO-START-LOADING] result=STARTED "
                 f"coord=({AUTO_START_LOADING_CHECK_X},{AUTO_START_LOADING_CHECK_Y}) "
-                f"RGB={color} elapsed={now - started_at:.3f}s"
+                f"RGB={color} target={AUTO_START_LOADING_COLOR} "
+                f"tol={AUTO_START_LOADING_COLOR_TOL} elapsed={now - started_at:.3f}s"
             )
-        elif color != AUTO_START_LOADING_COLOR and loading_started is not None:
+        elif not loading_color_matched and loading_started is not None:
             if detect_auto_start_not_period_color():
                 return "RETRY"
             print(
@@ -3629,38 +3639,71 @@ def clear_manual_start_popup():
     return "STOP"
 
 
+def click_manual_date_with_retry(date_text, reservation_id, date_position=None):
+    """Retry the date click only when the time window does not open."""
+    if date_position is None:
+        try:
+            year, month, day = map(int, str(date_text).split("-"))
+        except ValueError:
+            status.set(f"❌ 예약 날짜 형식이 잘못되어 {reservation_id}번 예약을 중단합니다")
+            return None
+        date_position = get_date_position(year, month, day)
+
+    dx, dy = date_position
+    logged_date_click(str(date_text), dx, dy, reservation_id, attempt=1)
+    if not safe_sleep(0.5):
+        status.set("⚠ ESC로 취소됨")
+        return None
+    if wait_for_time_window_ready(
+        max_attempts=1,
+        log_context=f"manual-date reservation={reservation_id} first-click",
+        save_diagnostic_on_failure=False,
+    ):
+        return True
+    if emergency_stop:
+        status.set("⚠ ESC로 취소됨")
+        return None
+
+    print(
+        f"[MANUAL-DATE-RETRY] 시간창 미오픈 → 날짜 재클릭 "
+        f"reservation={reservation_id} coord=({dx},{dy})"
+    )
+    logged_date_click(str(date_text), dx, dy, reservation_id, attempt=2)
+    return False
+
+
 def run_manual_start_flow(items=None):
     """수동 시작 시 예약 화면에 진입하고 예약리스트 첫 날짜를 선택한다."""
     if items is None:
         items = get_tree_items_sorted_by_id()
     if not items:
         status.set("❌ 예약리스트가 비어 있어 수동 시작을 중단합니다")
-        return False
+        return None
 
     first_values = tree.item(items[0]).get("values", [])
     if len(first_values) < 2:
         status.set("❌ 예약리스트 1번 날짜를 찾지 못해 수동 시작을 중단합니다")
-        return False
+        return None
     try:
         y, m, d = map(int, str(first_values[1]).split("-"))
     except ValueError:
         status.set("❌ 예약 날짜 형식이 잘못되어 수동 시작을 중단합니다")
-        return False
+        return None
     date_pos = get_date_position(y, m, d)
     if date_pos is None:
         status.set("❌ 예약 날짜 좌표를 찾지 못해 수동 시작을 중단합니다")
-        return False
+        return None
 
     while True:
         if emergency_stop:
             status.set("⚠ ESC로 취소됨")
-            return False
+            return None
 
         popup_result = clear_manual_start_popup()
         if popup_result == "STOP":
             if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
-            return False
+            return None
         if popup_result == "CLEARED":
             continue
 
@@ -3669,37 +3712,44 @@ def run_manual_start_flow(items=None):
         logged_click(AUTO_START_FIRST_CLICK_X, AUTO_START_FIRST_CLICK_Y)
         if not safe_sleep(AUTO_START_AFTER_FIRST_CLICK_DELAY_SEC):
             status.set("⚠ ESC로 취소됨")
-            return False
+            return None
 
         popup_result = clear_manual_start_popup()
         if popup_result == "STOP":
             if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
-            return False
+            return None
         if popup_result == "CLEARED":
             continue
 
-        while fast_pixel(
-            AUTO_START_LOADING_CHECK_X,
-            AUTO_START_LOADING_CHECK_Y,
-        ) == AUTO_START_LOADING_COLOR:
+        while True:
+            loading_color = fast_pixel(
+                AUTO_START_LOADING_CHECK_X,
+                AUTO_START_LOADING_CHECK_Y,
+            )
+            if not color_close(
+                *loading_color,
+                target=AUTO_START_LOADING_COLOR,
+                tol=AUTO_START_LOADING_COLOR_TOL,
+            ):
+                break
             if not safe_sleep(AUTO_START_LOADING_POLL_SEC):
                 status.set("⚠ ESC로 취소됨")
-                return False
+                return None
 
         if not safe_sleep(AUTO_START_AFTER_FIRST_CLICK_DELAY_SEC):
             status.set("⚠ ESC로 취소됨")
-            return False
+            return None
 
         logged_click(AUTO_START_NEXT_MONTH_CLICK_X, AUTO_START_NEXT_MONTH_CLICK_Y)
         if not safe_sleep(AUTO_START_AFTER_NEXT_CLICK_DELAY_SEC):
             status.set("⚠ ESC로 취소됨")
-            return False
+            return None
 
         if not wait_for_calendar_month(y, m):
             if emergency_stop:
                 status.set("⚠ ESC로 취소됨")
-                return False
+                return None
             status.set(
                 f"달력 연·월 미확인 (목표 {y:04d}-{m:02d}) → "
                 "관내우선예약 업데이트부터 재시도"
@@ -3713,16 +3763,14 @@ def run_manual_start_flow(items=None):
         pyautogui.press("pagedown")
         if not safe_sleep(MANUAL_START_AFTER_PAGE_DOWN_DELAY_SEC):
             status.set("⚠ ESC로 취소됨")
-            return False
+            return None
 
-        dx, dy = date_pos
-        logged_date_click(
-            str(first_values[1]),
-            dx,
-            dy,
-            first_values[0],
+        time_window_confirmed = click_manual_date_with_retry(
+            first_values[1], first_values[0], date_position=date_pos
         )
-        return True
+        if time_window_confirmed is None:
+            return None
+        return True, time_window_confirmed
 
 
 @track_reservation_activity
@@ -3769,6 +3817,7 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
     # ============================
     auto_start_date_clicked = False
     manual_start_date_clicked = False
+    manual_start_time_window_confirmed = False
     items = get_tree_items_sorted_by_id()
     if pending_only:
         items = [item for item in items if "done" not in tree.item(item)["tags"]]
@@ -3776,11 +3825,24 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
             status.set("예약반복대기 중 - 모든 예약 완료")
             return
     if f2_mode_var.get() == "manual":
-        manual_start_date_clicked = run_manual_start_flow(items)
-        if not manual_start_date_clicked:
+        manual_start_result = run_manual_start_flow(items)
+        if manual_start_result is None:
             return
+        manual_start_date_clicked, manual_start_time_window_confirmed = (
+            manual_start_result
+        )
 
     if from_auto:
+        if not focus_reservation_window():
+            stop_all_automation("❌ 예약 브라우저 포커스 실패 - 자동 시작 클릭 중단")
+            return
+        reservation_hwnd = get_browser_hwnd()
+        foreground_hwnd = ctypes.windll.user32.GetForegroundWindow()
+        print(
+            "[AUTO-START-FOCUS] focus_attempt=PASS "
+            f"reservation_hwnd={reservation_hwnd} foreground_hwnd={foreground_hwnd}"
+        )
+
         target_calendar_month = get_first_reservation_target_month()
         if target_calendar_month is None:
             status.set("❌ 예약 리스트 첫 항목의 날짜를 읽지 못해 자동 시작을 중단합니다")
@@ -3797,35 +3859,18 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
             attempt += 1
             status.set(f"자동 시작흐름 실행 중... ({attempt})")
 
-            # Click once, retry once only if the loading indicator never appears.
-            response = "NO_LOADING"
-            for click_attempt in range(1, AUTO_START_CLICK_MAX_ATTEMPTS + 1):
-                logged_click(
-                    AUTO_START_FIRST_CLICK_X,
-                    AUTO_START_FIRST_CLICK_Y,
-                    action=f"관내예약 attempt={click_attempt}",
-                    pause_after=False,
-                )
-                response = wait_for_auto_start_response()
-                if response != "NO_LOADING":
-                    break
-                if click_attempt < AUTO_START_CLICK_MAX_ATTEMPTS:
-                    print(
-                        "[AUTO-START-LOADING] result=NOT_STARTED "
-                        f"attempt={click_attempt}/{AUTO_START_CLICK_MAX_ATTEMPTS} "
-                        "action=retry-click"
-                    )
-
+            logged_click(
+                AUTO_START_FIRST_CLICK_X,
+                AUTO_START_FIRST_CLICK_Y,
+                action=f"관내예약 attempt={attempt}",
+                pause_after=False,
+            )
+            response = wait_for_auto_start_response()
             if response == "NO_LOADING":
                 print(
-                    "[AUTO-START-LOADING] result=FAILED "
-                    f"attempts={AUTO_START_CLICK_MAX_ATTEMPTS} "
-                    f"coord=({AUTO_START_FIRST_CLICK_X},{AUTO_START_FIRST_CLICK_Y})"
+                    "[AUTO-START-LOADING] 로딩 픽셀 미감지 - "
+                    "클릭 재시도 대신 달력 목표 월 확인으로 계속 진행"
                 )
-                stop_all_automation(
-                    "❌ 관내예약 클릭 후 로딩 미감지 - 재클릭 후에도 반응 없음"
-                )
-                return
 
             if response == "LOADING_TIMEOUT":
                 stop_all_automation(
@@ -3976,6 +4021,7 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
         date_clicked_before_startup,
         auto_start_date_clicked,
         pending_only,
+        manual_start_time_window_confirmed,
     )
     if emergency_stop:
         return
@@ -4005,6 +4051,8 @@ def finish_manual_reservation_list():
     """마지막 항목까지 처리한 수동 예약 목록을 페이지업으로 종료한다."""
     if not safe_sleep(AUTO_START_AFTER_LIST_COMPLETE_DELAY_SEC):
         return False
+    if not safe_sleep(1.0):
+        return False
     if not send_pageup_to_reservation_window(
         "manual-list-finished", focus_click_position=(900, 990)
     ):
@@ -4020,6 +4068,7 @@ def run_reservation_items(
     date_clicked_before_startup,
     auto_start_date_clicked,
     pending_only,
+    manual_start_time_window_confirmed=False,
 ):
     start_run_summary(f"run_reservation_items:repeat={repeat_count},pending={int(bool(pending_only))}")
     for round_idx in range(repeat_count):
@@ -4050,10 +4099,34 @@ def run_reservation_items(
             date_already_clicked = (
                 date_clicked_before_startup and round_idx == 0 and index == 0
             )
-            if calendar_click_mode.get() == "auto" and not date_already_clicked:
+            manual_time_window_confirmed = (
+                manual_start_time_window_confirmed
+                and round_idx == 0
+                and index == 0
+            )
+            if f2_mode_var.get() == "manual" and not date_already_clicked:
+                manual_time_window_confirmed = click_manual_date_with_retry(
+                    res["date"], res["id"]
+                )
+                if manual_time_window_confirmed is None:
+                    print_run_summary_once("run_reservation_items_end")
+                    return
+            if (
+                f2_mode_var.get() != "manual"
+                and calendar_click_mode.get() == "auto"
+                and not date_already_clicked
+            ):
                 page_down_and_fix(res["date"], res["id"])
 
-            if auto_start_date_clicked and round_idx == 0 and index == 0:
+            time_window_confirmed = (
+                manual_time_window_confirmed
+                or (
+                    auto_start_date_clicked
+                    and round_idx == 0
+                    and index == 0
+                )
+            )
+            if time_window_confirmed:
                 started_at = time.monotonic()
                 try:
                     result = run_reservation(res, time_window_confirmed=True)
@@ -4502,7 +4575,7 @@ def build_process_coordinate_summary_text():
     lines.append("- 수동 개발도구 팝업: (579,705), RGB=(240,248,255) 감지 시 클릭 → 0.1초 → 재클릭 → 0.1초 → 닫힘 확인 → PageUp → 0.3초 → 시작 전 검사부터 재시작")
     lines.append(f"- 수동 시작 전 팝업: 닫힘을 최대 {MANUAL_START_POPUP_CLOSE_TIMEOUT_SEC:.1f}초 확인, 미확인 시 첫 클릭 없이 해당 실행 중단")
     lines.append("- 자동 실행 준비 클릭: (235,325) [엔터 기록]")
-    lines.append(f"- 자동 실행 로딩 확인: 클릭 직후 ({AUTO_START_LOADING_CHECK_X},{AUTO_START_LOADING_CHECK_Y}) RGB={AUTO_START_LOADING_COLOR} 출현 후 사라지면 즉시 완료, 대기 간격 {AUTO_START_LOADING_POLL_SEC:.3f}초, 시작/완료 합산 제한 {AUTO_START_LOADING_TIMEOUT_SEC:.1f}초, 미시작 시 최대 {AUTO_START_CLICK_MAX_ATTEMPTS}회 클릭")
+    lines.append(f"- 자동 실행 로딩 확인: 클릭 직후 ({AUTO_START_LOADING_CHECK_X},{AUTO_START_LOADING_CHECK_Y}) RGB={AUTO_START_LOADING_COLOR} 허용오차 ±{AUTO_START_LOADING_COLOR_TOL} 적용, 출현 후 사라지면 즉시 완료, 대기 간격 {AUTO_START_LOADING_POLL_SEC:.3f}초, 시작/완료 합산 제한 {AUTO_START_LOADING_TIMEOUT_SEC:.1f}초, 미감지 시 재클릭하지 않고 달력 목표 월 확인으로 계속 진행")
     lines.append(f"- 자동 실행 로딩 완료 후 대기: {AUTO_START_AFTER_LOADING_DELAY_SEC:.1f}초")
     lines.append("- 자동 실행 다음달 클릭: (682,675)")
     lines.append("- 준비 색상 검사 좌표: (427,739)")
@@ -4616,6 +4689,10 @@ tk.Button(
 def start_reservation_test_now():
     # 테스트 버튼은 목표시간 대기 없이 즉시 실행한다.
     # F2 자동 모드에서는 실제 자동 진입 루틴(from_auto)을 그대로 테스트한다.
+    if _reservation_activity:
+        print("[AUTO-START-TEST] 예약 실행 중 재호출 무시")
+        status.set("예약 실행 중 - 중복 테스트 시작을 무시했습니다")
+        return
     if f2_mode_var.get() == "auto":
         start_on_enter(from_auto=True, from_f2=True)
     else:
