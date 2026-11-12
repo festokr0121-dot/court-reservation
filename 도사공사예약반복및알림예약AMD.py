@@ -30,6 +30,7 @@ AUTO_START_NOT_PERIOD_COLOR = (0, 0, 0)
 AUTO_START_LOADING_CHECK_X = 56
 AUTO_START_LOADING_CHECK_Y = 60
 AUTO_START_LOADING_COLOR = (39, 35, 32)
+AUTO_START_LOADING_COLOR_TOL = 10
 AUTO_START_LOADING_POLL_SEC = 0.005
 AUTO_START_LOADING_TIMEOUT_SEC = 10.0
 AUTO_START_AFTER_LOADING_DELAY_SEC = 0.1
@@ -3302,14 +3303,21 @@ def wait_for_auto_start_response():
                 f"elapsed={now - started_at:.3f}s RGB={color}"
             )
             return result
-        if color == AUTO_START_LOADING_COLOR and loading_started is None:
+        loading_color_matched = color_close(
+            color[0],
+            color[1],
+            color[2],
+            AUTO_START_LOADING_COLOR,
+            tol=AUTO_START_LOADING_COLOR_TOL,
+        )
+        if loading_color_matched and loading_started is None:
             loading_started = now
             print(
                 "[AUTO-START-LOADING] result=STARTED "
                 f"coord=({AUTO_START_LOADING_CHECK_X},{AUTO_START_LOADING_CHECK_Y}) "
                 f"RGB={color} elapsed={now - started_at:.3f}s"
             )
-        elif color != AUTO_START_LOADING_COLOR and loading_started is not None:
+        elif not loading_color_matched and loading_started is not None:
             if detect_auto_start_not_period_color():
                 return "RETRY"
             print(
@@ -3557,10 +3565,14 @@ def run_manual_start_flow(items=None):
         if popup_result == "CLEARED":
             continue
 
-        while fast_pixel(
-            AUTO_START_LOADING_CHECK_X,
-            AUTO_START_LOADING_CHECK_Y,
-        ) == AUTO_START_LOADING_COLOR:
+        while color_close(
+            *fast_pixel(
+                AUTO_START_LOADING_CHECK_X,
+                AUTO_START_LOADING_CHECK_Y,
+            ),
+            AUTO_START_LOADING_COLOR,
+            tol=AUTO_START_LOADING_COLOR_TOL,
+        ):
             if not safe_sleep(AUTO_START_LOADING_POLL_SEC):
                 status.set("⚠ ESC로 취소됨")
                 return False
