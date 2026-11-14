@@ -27,6 +27,7 @@ AUTO_START_AFTER_FIRST_CLICK_DELAY_SEC = 0.1
 AUTO_START_NOT_PERIOD_CHECK_X = 665
 AUTO_START_NOT_PERIOD_CHECK_Y = 207
 AUTO_START_NOT_PERIOD_COLOR = (0, 0, 0)
+AUTO_START_NOT_PERIOD_COLORS = (AUTO_START_NOT_PERIOD_COLOR, (36, 104, 212))
 AUTO_START_LOADING_CHECK_X = 56
 AUTO_START_LOADING_CHECK_Y = 60
 AUTO_START_LOADING_COLOR = (39, 35, 32)
@@ -3462,7 +3463,7 @@ def check_ready_color_limited(max_try=5):
 
 
 def wait_for_auto_start_response():
-    """Observe loading start and completion within one 10-second deadline."""
+    """Monitor loading and retry colors together within one 10-second deadline."""
     started_at = time.monotonic()
     deadline = started_at + AUTO_START_LOADING_TIMEOUT_SEC
     loading_started = None
@@ -3525,12 +3526,19 @@ def wait_for_auto_start_response():
 
 
 def detect_auto_start_not_period_color():
-    """관내우선예약 기간이 아님을 나타내는 픽셀 색상인지 확인한다."""
+    """관내우선예약 기간 아님 색상(검정 또는 파랑)과 정확히 일치하는지 확인한다."""
     color = fast_pixel(
         AUTO_START_NOT_PERIOD_CHECK_X,
         AUTO_START_NOT_PERIOD_CHECK_Y,
     )
-    return color == AUTO_START_NOT_PERIOD_COLOR
+    if color in AUTO_START_NOT_PERIOD_COLORS:
+        print(
+            "[AUTO-START-RETRY-COLOR] "
+            f"coord=({AUTO_START_NOT_PERIOD_CHECK_X},{AUTO_START_NOT_PERIOD_CHECK_Y}) "
+            f"RGB={color} result=MATCH"
+        )
+        return True
+    return False
 
 
 def get_first_reservation_date_position():
@@ -3879,8 +3887,11 @@ def start_on_enter(event=None, from_auto=False, from_f2=False, pending_only=Fals
                 return
 
             if response == "RETRY":
-                status.set("예약 기간 아님 감지 → (665, 207) 클릭 후 1번부터 재시작")
-                print("[AUTO-START] coord=(665,207) RGB=(0,0,0) → 클릭 후 1번 재시작")
+                status.set("재시도 색상 감지 → (665, 207) 클릭 후 관내우선예약 재클릭")
+                print(
+                    "[AUTO-START] coord=(665,207) "
+                    "→ 클릭 후 관내우선예약 재클릭"
+                )
                 logged_click(AUTO_START_NOT_PERIOD_CHECK_X, AUTO_START_NOT_PERIOD_CHECK_Y)
                 if not safe_sleep(AUTO_START_RETRY_CLICK_DELAY_SEC):
                     status.set("⚠ ESC로 취소됨")
